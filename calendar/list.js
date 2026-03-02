@@ -17,14 +17,19 @@ async function handleListEvents(args) {
     // Get access token
     const accessToken = await ensureAuthenticated();
     
-    // Build API endpoint
-    let endpoint = 'me/events';
-    
+    // Build API endpoint — calendarView expands recurring events
+    // and requires startDateTime/endDateTime
+    let endpoint = 'me/calendarView';
+
+    const now = new Date();
+    const thirtyDaysOut = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
     // Add query parameters
     const queryParams = {
+      startDateTime: now.toISOString(),
+      endDateTime: thirtyDaysOut.toISOString(),
       $top: count,
       $orderby: 'start/dateTime',
-      $filter: `start/dateTime ge '${new Date().toISOString()}'`,
       $select: config.CALENDAR_SELECT_FIELDS
     };
     
@@ -44,7 +49,7 @@ async function handleListEvents(args) {
     const eventList = response.value.map((event, index) => {
       const startDate = new Date(event.start.dateTime).toLocaleString(event.start.timeZone);
       const endDate = new Date(event.end.dateTime).toLocaleString(event.end.timeZone);
-      const location = event.location.displayName || 'No location';
+      const location = event.location?.displayName || 'No location';
       
       return `${index + 1}. ${event.subject} - Location: ${location}\nStart: ${startDate}\nEnd: ${endDate}\nSubject: ${event.subject}\nSummary: ${event.bodyPreview}\nID: ${event.id}\n`;
     }).join("\n");

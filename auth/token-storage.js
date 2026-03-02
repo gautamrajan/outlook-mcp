@@ -3,6 +3,10 @@ const path = require('path');
 const https = require('https');
 const querystring = require('querystring');
 
+const REFRESH_TIMEOUT_MS = 30000;
+const MAX_REFRESH_RETRIES = 2;
+const RETRY_DELAY_MS = 1000;
+
 class TokenStorage {
   constructor(config) {
     this.config = {
@@ -11,9 +15,9 @@ class TokenStorage {
       clientSecret: process.env.MS_CLIENT_SECRET,
       redirectUri: process.env.MS_REDIRECT_URI || 'http://localhost:3333/auth/callback',
       scopes: (process.env.MS_SCOPES || 'offline_access User.Read Mail.Read').split(' '),
-      tokenEndpoint: process.env.MS_TOKEN_ENDPOINT || 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-      refreshTokenBuffer: 5 * 60 * 1000, // 5 minutes buffer for token refresh
-      ...config // Allow overriding default config
+      tokenEndpoint: process.env.MS_TOKEN_ENDPOINT || `https://login.microsoftonline.com/${process.env.MS_TENANT_ID || 'common'}/oauth2/v2.0/token`,
+      refreshTokenBuffer: 5 * 60 * 1000,
+      ...config
     };
     this.tokens = null;
     this._loadPromise = null;
@@ -22,6 +26,15 @@ class TokenStorage {
     if (!this.config.clientId || !this.config.clientSecret) {
       console.warn("TokenStorage: MS_CLIENT_ID or MS_CLIENT_SECRET is not configured. Token operations might fail.");
     }
+  }
+
+  _isAuthError(error) {
+    const msg = (error.message || '').toLowerCase();
+    return msg.includes('invalid_grant') ||
+           msg.includes('invalid_client') ||
+           msg.includes('unauthorized_client') ||
+           msg.includes('interaction_required') ||
+           msg.includes('consent_required');
   }
 
   async _loadTokensFromFile() {
@@ -80,8 +93,14 @@ class TokenStorage {
     return Date.now() >= (this.tokens.expires_at - this.config.refreshTokenBuffer);
   }
 
+  invalidateAccessToken() {
+    if (this.tokens) {
+      this.tokens.expires_at = 0;
+    }
+  }
+
   async getValidAccessToken() {
-    await this.getTokens(); // Ensure tokens are loaded
+    await this.getTokens();
 
     if (!this.tokens || !this.tokens.access_token) {
       console.log('No access token available.');
@@ -95,14 +114,15 @@ class TokenStorage {
           return await this.refreshAccessToken();
         } catch (refreshError) {
           console.error('Failed to refresh access token:', refreshError);
-          this.tokens = null; // Invalidate tokens on refresh failure
-          await this._saveTokensToFile(); // Persist invalidation
+          if (this._isAuthError(refreshError)) {
+            console.error('Definitive auth error — clearing tokens.');
+            this.tokens = null;
+            try { await fs.unlink(this.config.tokenStorePath); } catch (_) {}
+          }
           return null;
         }
       } else {
         console.warn('No refresh token available. Cannot refresh access token.');
-        this.tokens = null; // Invalidate tokens as they are expired and cannot be refreshed
-        await this._saveTokensToFile(); // Persist invalidation
         return null;
       }
     }
@@ -114,13 +134,38 @@ class TokenStorage {
       throw new Error('No refresh token available to refresh the access token.');
     }
 
-    // Prevent multiple concurrent refresh attempts
     if (this._refreshPromise) {
-        console.log("Refresh already in progress, returning existing promise.");
-        return this._refreshPromise.then(tokens => tokens.access_token);
+      console.log("Refresh already in progress, returning existing promise.");
+      return this._refreshPromise;
     }
 
-    console.log('Attempting to refresh access token...');
+    this._refreshPromise = this._refreshWithRetry().finally(() => {
+      this._refreshPromise = null;
+    });
+
+    return this._refreshPromise;
+  }
+
+  async _refreshWithRetry() {
+    let lastError;
+    for (let attempt = 0; attempt < MAX_REFRESH_RETRIES; attempt++) {
+      try {
+        return await this._doRefresh();
+      } catch (error) {
+        lastError = error;
+        if (this._isAuthError(error)) {
+          throw error;
+        }
+        console.error(`Refresh attempt ${attempt + 1} failed (transient):`, error.message);
+        if (attempt < MAX_REFRESH_RETRIES - 1) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  _doRefresh() {
     const postData = querystring.stringify({
       client_id: this.config.clientId,
       client_secret: this.config.clientSecret,
@@ -129,63 +174,59 @@ class TokenStorage {
       scope: this.config.scopes.join(' ')
     });
 
-    const requestOptions = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(postData)
-      }
-    };
+    return new Promise((resolve, reject) => {
+      const req = https.request(this.config.tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData)
+        },
+        timeout: REFRESH_TIMEOUT_MS
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', async () => {
+          try {
+            const responseBody = JSON.parse(data);
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              this.tokens.access_token = responseBody.access_token;
+              if (responseBody.refresh_token) {
+                this.tokens.refresh_token = responseBody.refresh_token;
+              }
+              this.tokens.expires_in = responseBody.expires_in;
+              this.tokens.expires_at = Date.now() + (responseBody.expires_in * 1000);
+              try {
+                await this._saveTokensToFile();
+              } catch (saveError) {
+                console.error('Failed to persist refreshed tokens (using in-memory):', saveError);
+              }
+              console.log('Access token refreshed successfully.');
+              resolve(this.tokens.access_token);
+            } else {
+              const errorCode = responseBody.error || '';
+              const errorDesc = responseBody.error_description || `status ${res.statusCode}`;
+              const errMsg = errorCode ? `${errorCode}: ${errorDesc}` : errorDesc;
+              console.error('Error refreshing token:', responseBody);
+              reject(new Error(errMsg));
+            }
+          } catch (e) {
+            console.error('Error processing refresh response:', e);
+            reject(e);
+          }
+        });
+      });
 
-    this._refreshPromise = new Promise((resolve, reject) => {
-        const req = https.request(this.config.tokenEndpoint, requestOptions, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', async () => {
-                try {
-                    const responseBody = JSON.parse(data);
-                    if (res.statusCode >= 200 && res.statusCode < 300) {
-                        this.tokens.access_token = responseBody.access_token;
-                        // Microsoft Graph API refresh tokens may or may not return a new refresh_token
-                        if (responseBody.refresh_token) {
-                            this.tokens.refresh_token = responseBody.refresh_token;
-                        }
-                        this.tokens.expires_in = responseBody.expires_in;
-                        this.tokens.expires_at = Date.now() + (responseBody.expires_in * 1000);
-                        try {
-                            await this._saveTokensToFile();
-                            console.log('Access token refreshed and saved successfully.');
-                            resolve(this.tokens);
-                        } catch (saveError) {
-                            console.error('Failed to save refreshed tokens:', saveError);
-                            // Even if save fails, tokens are updated in memory.
-                            // Depending on desired strictness, could reject here.
-                            // For now, resolve with in-memory tokens but log critical error.
-                            // Or, to be stricter and align with re-throwing:
-                            reject(new Error(`Access token refreshed but failed to save: ${saveError.message}`));
-                        }
-                    } else {
-                        console.error('Error refreshing token:', responseBody);
-                        reject(new Error(responseBody.error_description || `Token refresh failed with status ${res.statusCode}`));
-                    }
-                } catch (e) { // Catch any error during parsing or saving
-                    console.error('Error processing refresh token response or saving tokens:', e);
-                    reject(e);
-                } finally {
-                    this._refreshPromise = null; // Clear promise after completion
-                }
-            });
-        });
-        req.on('error', (error) => {
-            console.error('HTTP error during token refresh:', error);
-            reject(error);
-            this._refreshPromise = null; // Clear promise on error
-        });
-        req.write(postData);
-        req.end();
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Token refresh request timed out'));
+      });
+      req.on('error', (error) => {
+        console.error('HTTP error during token refresh:', error);
+        reject(error);
+      });
+      req.write(postData);
+      req.end();
     });
-
-    return this._refreshPromise.then(tokens => tokens.access_token);
   }
 
 
