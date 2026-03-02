@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Load environment variables from .env file
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // Log to console
 console.log('Starting Outlook Authentication Server');

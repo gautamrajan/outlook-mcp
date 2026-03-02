@@ -6,6 +6,7 @@ const os = require('os');
 
 // Ensure we have a home directory path even if process.env.HOME is undefined
 const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir() || '/tmp';
+const tenantId = process.env.OUTLOOK_TENANT_ID || process.env.MS_TENANT_ID || 'common';
 
 module.exports = {
   // Server information
@@ -19,6 +20,8 @@ module.exports = {
   AUTH_CONFIG: {
     clientId: process.env.OUTLOOK_CLIENT_ID || process.env.MS_CLIENT_ID || '',
     clientSecret: process.env.OUTLOOK_CLIENT_SECRET || process.env.MS_CLIENT_SECRET || '',
+    tenantId,
+    tokenEndpoint: process.env.MS_TOKEN_ENDPOINT || `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
     redirectUri: 'http://localhost:3333/auth/callback',
     scopes: ['offline_access', 'Mail.Read', 'Mail.ReadWrite', 'User.Read', 'Calendars.Read', 'Calendars.ReadWrite', 'Contacts.Read'],
     tokenStorePath: path.join(homeDir, '.outlook-mcp-tokens.json'),

@@ -10,6 +10,7 @@ const tokenStorage = new TokenStorage({
   tokenStorePath: config.AUTH_CONFIG.tokenStorePath,
   clientId: config.AUTH_CONFIG.clientId,
   clientSecret: config.AUTH_CONFIG.clientSecret,
+  tokenEndpoint: config.AUTH_CONFIG.tokenEndpoint,
   redirectUri: config.AUTH_CONFIG.redirectUri,
   scopes: config.AUTH_CONFIG.scopes
 });

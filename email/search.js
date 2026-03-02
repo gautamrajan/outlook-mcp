@@ -100,8 +100,7 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
         // For single term search, only use $search with that term
         const simplifiedParams = {
           $top: Math.min(50, maxCount),
-          $select: config.EMAIL_SELECT_FIELDS,
-          $orderby: 'receivedDateTime desc'
+          $select: config.EMAIL_SELECT_FIELDS
         };
         
         // Add the search term in the appropriate KQL syntax
@@ -184,8 +183,7 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
 function buildSearchParams(searchTerms, filterTerms, count) {
   const params = {
     $top: count,
-    $select: config.EMAIL_SELECT_FIELDS,
-    $orderby: 'receivedDateTime desc'
+    $select: config.EMAIL_SELECT_FIELDS
   };
   
   // Handle search terms
