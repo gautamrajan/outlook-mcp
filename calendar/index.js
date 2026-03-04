@@ -6,6 +6,8 @@ const handleDeclineEvent = require('./decline');
 const handleCreateEvent = require('./create');
 const handleCancelEvent = require('./cancel');
 const handleDeleteEvent = require('./delete');
+const handleAcceptEvent = require('./accept');
+const handleTentativelyAcceptEvent = require('./tentatively-accept');
 
 // Calendar tool definitions
 const calendarTools = [
@@ -110,6 +112,44 @@ const calendarTools = [
       required: ["eventId"]
     },
     handler: handleDeleteEvent
+  },
+  {
+    name: "accept-event",
+    description: "Accepts a calendar event",
+    inputSchema: {
+      type: "object",
+      properties: {
+        eventId: {
+          type: "string",
+          description: "The ID of the event to accept"
+        },
+        comment: {
+          type: "string",
+          description: "Optional comment for accepting the event"
+        }
+      },
+      required: ["eventId"]
+    },
+    handler: handleAcceptEvent
+  },
+  {
+    name: "tentatively-accept-event",
+    description: "Tentatively accepts a calendar event",
+    inputSchema: {
+      type: "object",
+      properties: {
+        eventId: {
+          type: "string",
+          description: "The ID of the event to tentatively accept"
+        },
+        comment: {
+          type: "string",
+          description: "Optional comment for tentatively accepting the event"
+        }
+      },
+      required: ["eventId"]
+    },
+    handler: handleTentativelyAcceptEvent
   }
 ];
 
@@ -119,5 +159,7 @@ module.exports = {
   handleDeclineEvent,
   handleCreateEvent,
   handleCancelEvent,
-  handleDeleteEvent
+  handleDeleteEvent,
+  handleAcceptEvent,
+  handleTentativelyAcceptEvent
 };

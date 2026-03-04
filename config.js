@@ -12,10 +12,10 @@ module.exports = {
   // Server information
   SERVER_NAME: "outlook-assistant",
   SERVER_VERSION: "1.0.0",
-  
+
   // Test mode setting
   USE_TEST_MODE: process.env.USE_TEST_MODE === 'true',
-  
+
   // Authentication configuration
   AUTH_CONFIG: {
     clientId: process.env.OUTLOOK_CLIENT_ID || process.env.MS_CLIENT_ID || '',

@@ -11,6 +11,10 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# MCPB bundles and manifest (contain embedded credentials)
+*.mcpb
+manifest.json
+
 # Tokens and credentials
 *.pem
 *.key

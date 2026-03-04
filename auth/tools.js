@@ -2,6 +2,7 @@
  * Authentication-related tools for the Outlook MCP server
  */
 const config = require('../config');
+const { startAuthServer, getServerStatus } = require('./embedded-server');
 
 let _tokenStorage = null;
 function getTokenStorage() {
@@ -51,15 +52,27 @@ async function handleAuthenticate(args) {
     };
   }
   
-  // For real authentication, generate an auth URL and instruct the user to visit it
-  const authUrl = `${config.AUTH_CONFIG.authServerUrl}/auth?client_id=${config.AUTH_CONFIG.clientId}`;
-  
-  return {
-    content: [{
-      type: "text",
-      text: `Authentication required. Please visit the following URL to authenticate with Microsoft: ${authUrl}\n\nAfter authentication, you will be redirected back to this application.`
-    }]
-  };
+  // Start the embedded auth server and return the auth URL
+  try {
+    const serverUrl = await startAuthServer();
+    const authUrl = `${serverUrl}/auth?client_id=${config.AUTH_CONFIG.clientId}`;
+
+    return {
+      content: [{
+        type: "text",
+        text: `Authentication required. Please visit the following URL to authenticate with Microsoft:\n\n${authUrl}\n\nThe authentication server is running and will handle the callback automatically. After signing in, you can close the browser tab and use the check-auth-status tool to confirm.`
+      }]
+    };
+  } catch (err) {
+    console.error('[AUTHENTICATE] Failed to start auth server:', err.message);
+    return {
+      content: [{
+        type: "text",
+        text: `Failed to start the authentication server: ${err.message}`
+      }],
+      isError: true
+    };
+  }
 }
 
 /**
@@ -68,20 +81,27 @@ async function handleAuthenticate(args) {
  */
 async function handleCheckAuthStatus() {
   console.error('[CHECK-AUTH-STATUS] Starting authentication status check');
-  
-  const accessToken = await getTokenStorage().getValidAccessToken();
 
-  if (!accessToken) {
-    console.error('[CHECK-AUTH-STATUS] No valid access token found');
+  const accessToken = await getTokenStorage().getValidAccessToken();
+  const serverStatus = getServerStatus();
+
+  if (accessToken) {
+    console.error('[CHECK-AUTH-STATUS] Access token present and valid');
     return {
-      content: [{ type: "text", text: "Not authenticated" }]
+      content: [{ type: "text", text: "Authenticated and ready" }]
     };
   }
 
-  console.error('[CHECK-AUTH-STATUS] Access token present and valid');
+  if (serverStatus.running && serverStatus.state === 'waiting') {
+    console.error('[CHECK-AUTH-STATUS] Auth server running, waiting for user to complete login');
+    return {
+      content: [{ type: "text", text: "Not yet authenticated. The auth server is running and waiting for you to complete the Microsoft login in your browser." }]
+    };
+  }
 
+  console.error('[CHECK-AUTH-STATUS] No valid access token found');
   return {
-    content: [{ type: "text", text: "Authenticated and ready" }]
+    content: [{ type: "text", text: "Not authenticated. Use the authenticate tool to start the login flow." }]
   };
 }
 
