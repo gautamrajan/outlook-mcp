@@ -2,21 +2,21 @@
  * HTTP transport for the Outlook MCP Server.
  *
  * Wraps the MCP SDK's StreamableHTTPServerTransport in an Express app that:
- *   1. Validates Entra ID bearer tokens on every /mcp request
+ *   1. Authenticates requests via session tokens
  *   2. Sets per-request user context via AsyncLocalStorage
  *   3. Creates a per-request MCP Server + Transport (stateless mode)
  *
  * Usage:
  *   const { startHttpServer } = require('./transport/http-server');
- *   startHttpServer();
+ *   startHttpServer({ sessionStore });
  */
 
 const express = require('express');
 const http = require('http');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
-const { createEntraMiddleware } = require('../auth/entra-middleware');
 const { requestContext } = require('../auth/request-context');
+const { createAuthRoutes } = require('../auth/auth-routes');
 const config = require('../config');
 
 // Import module tools
@@ -34,6 +34,48 @@ const TOOLS = [
   ...folderTools,
   ...rulesTools,
 ];
+
+/**
+ * Create Express middleware that validates session tokens on incoming requests.
+ *
+ * Extracts the token from the `Authorization: Bearer <token>` header, validates
+ * it against the SessionStore, and populates `req.user` with the session identity.
+ * Returns 401 with a helpful JSON body when authentication fails.
+ *
+ * @param {import('../auth/session-store')} sessionStore
+ * @returns {import('express').RequestHandler}
+ */
+function createSessionMiddleware(sessionStore) {
+  return (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'auth_required',
+        message: 'Session expired or missing. Authenticate at: /auth/login',
+        authUrl: '/auth/login',
+      });
+    }
+
+    const token = authHeader.slice(7); // Remove 'Bearer '
+    const session = sessionStore.validateSession(token);
+
+    if (!session) {
+      return res.status(401).json({
+        error: 'auth_required',
+        message: 'Session expired or invalid. Re-authenticate at: /auth/login',
+        authUrl: '/auth/login',
+      });
+    }
+
+    // Set user identity on request for downstream use
+    req.user = {
+      id: session.userId,
+      sessionToken: token,
+    };
+
+    next();
+  };
+}
 
 /**
  * Build the fallbackRequestHandler that is attached to each per-request
@@ -116,29 +158,40 @@ function createFallbackRequestHandler() {
  * Create and return the Express app (without starting it).
  * Exported separately for testing with supertest.
  *
+ * @param {object} [opts]
+ * @param {import('../auth/session-store')} [opts.sessionStore]  When provided,
+ *   session-token auth middleware is applied to the `/mcp` route. Omit for
+ *   unauthenticated usage (e.g. tests that don't need auth).
+ * @param {import('../auth/per-user-token-storage')} [opts.tokenStorage]  When provided
+ *   alongside sessionStore, browser auth routes are mounted at `/auth`.
  * @returns {express.Application}
  */
-function createHttpApp() {
+function createHttpApp({ sessionStore, tokenStorage } = {}) {
   const app = express();
 
-  // ── Entra JWT middleware on the MCP route ─────────────────────────
-  const entraMiddleware = createEntraMiddleware({
-    tenantId: config.AUTH_CONFIG.tenantId,
-    clientId: config.AUTH_CONFIG.clientId,
-  });
+  // ── Browser auth routes (login + callback) ────────────────────────
+  if (sessionStore && tokenStorage) {
+    const authRouter = createAuthRoutes({
+      tokenStorage,
+      sessionStore,
+      config,
+    });
+    app.use('/auth', authRouter);
+  }
 
-  // Apply auth to all MCP methods
-  app.use('/mcp', entraMiddleware);
+  // ── Session-token auth middleware (optional) ───────────────────────
+  if (sessionStore) {
+    app.use('/mcp', createSessionMiddleware(sessionStore));
+  }
 
   // ── MCP request handler ──────────────────────────────────────────
   // POST, GET, DELETE all go through the same handler.
   // NOTE: We do NOT use express.json() — the StreamableHTTPServerTransport
   // handles body parsing internally.
   app.all('/mcp', async (req, res) => {
-    // Wrap in AsyncLocalStorage so tool handlers can access user identity
     const userCtx = {
-      userId: req.user.id,
-      entraToken: req.user.token,
+      userId: req.user?.id,
+      sessionToken: req.user?.sessionToken,
     };
 
     await requestContext.run(userCtx, async () => {
@@ -173,10 +226,13 @@ function createHttpApp() {
 /**
  * Start the HTTP server.
  *
+ * @param {object} [opts]
+ * @param {import('../auth/session-store')} [opts.sessionStore]  Passed through to createHttpApp.
+ * @param {import('../auth/per-user-token-storage')} [opts.tokenStorage]  Passed through to createHttpApp.
  * @returns {http.Server} The Node http.Server instance (useful for tests / graceful shutdown).
  */
-function startHttpServer() {
-  const app = createHttpApp();
+function startHttpServer({ sessionStore, tokenStorage } = {}) {
+  const app = createHttpApp({ sessionStore, tokenStorage });
   const port = process.env.PORT || 3000;
 
   const httpServer = app.listen(port, () => {
@@ -194,4 +250,4 @@ function startHttpServer() {
   return httpServer;
 }
 
-module.exports = { createHttpApp, startHttpServer };
+module.exports = { createHttpApp, startHttpServer, createSessionMiddleware };

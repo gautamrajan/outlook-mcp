@@ -101,71 +101,112 @@ describe('config', () => {
     expect(config.PORT).toBe(8080);
   });
 
-  // ── HOSTED_AUTH ─────────────────────────────────────────────────
+  // ── HOSTED ─────────────────────────────────────────────────────
 
-  test('HOSTED_AUTH.enabled should be false when MCP_TRANSPORT is not "http"', () => {
+  test('HOSTED.enabled should be false when MCP_TRANSPORT is not "http"', () => {
     delete process.env.MCP_TRANSPORT;
     const config = require('../config');
-    expect(config.HOSTED_AUTH.enabled).toBe(false);
+    expect(config.HOSTED.enabled).toBe(false);
   });
 
-  test('HOSTED_AUTH.enabled should be false when MCP_TRANSPORT is "stdio"', () => {
+  test('HOSTED.enabled should be false when MCP_TRANSPORT is "stdio"', () => {
     process.env.MCP_TRANSPORT = 'stdio';
     const config = require('../config');
-    expect(config.HOSTED_AUTH.enabled).toBe(false);
+    expect(config.HOSTED.enabled).toBe(false);
   });
 
-  test('HOSTED_AUTH.enabled should be true when MCP_TRANSPORT is "http"', () => {
+  test('HOSTED.enabled should be true when MCP_TRANSPORT is "http"', () => {
     process.env.MCP_TRANSPORT = 'http';
     const config = require('../config');
-    expect(config.HOSTED_AUTH.enabled).toBe(true);
+    expect(config.HOSTED.enabled).toBe(true);
   });
 
-  test('HOSTED_AUTH.enabled should be true when MCP_TRANSPORT is "HTTP" (case-insensitive)', () => {
+  test('HOSTED.enabled should be true when MCP_TRANSPORT is "HTTP" (case-insensitive)', () => {
     process.env.MCP_TRANSPORT = 'HTTP';
     const config = require('../config');
-    expect(config.HOSTED_AUTH.enabled).toBe(true);
+    expect(config.HOSTED.enabled).toBe(true);
   });
 
-  test('HOSTED_AUTH.tenantId should default to "common"', () => {
-    delete process.env.OUTLOOK_TENANT_ID;
-    delete process.env.MS_TENANT_ID;
+  test('HOSTED should have the expected shape', () => {
     const config = require('../config');
-    expect(config.HOSTED_AUTH.tenantId).toBe('common');
+    expect(config.HOSTED).toHaveProperty('enabled');
+    expect(config.HOSTED).toHaveProperty('tokenEncryptionKey');
+    expect(config.HOSTED).toHaveProperty('tokenStorePath');
+    expect(config.HOSTED).toHaveProperty('sessionStorePath');
+    expect(config.HOSTED).toHaveProperty('hostedRedirectUri');
   });
 
-  test('HOSTED_AUTH.tenantId should prefer OUTLOOK_TENANT_ID over MS_TENANT_ID', () => {
-    process.env.OUTLOOK_TENANT_ID = 'outlook-tenant';
-    process.env.MS_TENANT_ID = 'ms-tenant';
+  test('HOSTED.tokenEncryptionKey should default to empty string', () => {
+    delete process.env.TOKEN_ENCRYPTION_KEY;
     const config = require('../config');
-    expect(config.HOSTED_AUTH.tenantId).toBe('outlook-tenant');
+    expect(config.HOSTED.tokenEncryptionKey).toBe('');
   });
 
-  test('HOSTED_AUTH.tenantId should fall back to MS_TENANT_ID', () => {
-    delete process.env.OUTLOOK_TENANT_ID;
-    process.env.MS_TENANT_ID = 'ms-tenant';
+  test('HOSTED.tokenEncryptionKey should reflect env var', () => {
+    process.env.TOKEN_ENCRYPTION_KEY = 'my-secret-key';
     const config = require('../config');
-    expect(config.HOSTED_AUTH.tenantId).toBe('ms-tenant');
+    expect(config.HOSTED.tokenEncryptionKey).toBe('my-secret-key');
   });
 
-  test('HOSTED_AUTH.clientId should default to empty string', () => {
-    delete process.env.OUTLOOK_CLIENT_ID;
-    delete process.env.MS_CLIENT_ID;
+  test('HOSTED.tokenStorePath should default to home dir path', () => {
+    delete process.env.TOKEN_STORE_PATH;
     const config = require('../config');
-    expect(config.HOSTED_AUTH.clientId).toBe('');
+    expect(config.HOSTED.tokenStorePath).toMatch(/\.outlook-mcp-hosted-tokens\.json$/);
   });
 
-  test('HOSTED_AUTH.clientId should prefer OUTLOOK_CLIENT_ID over MS_CLIENT_ID', () => {
-    process.env.OUTLOOK_CLIENT_ID = 'outlook-client';
-    process.env.MS_CLIENT_ID = 'ms-client';
+  test('HOSTED.tokenStorePath should reflect env var', () => {
+    process.env.TOKEN_STORE_PATH = '/custom/path/tokens.json';
     const config = require('../config');
-    expect(config.HOSTED_AUTH.clientId).toBe('outlook-client');
+    expect(config.HOSTED.tokenStorePath).toBe('/custom/path/tokens.json');
   });
 
-  test('HOSTED_AUTH should have the expected shape', () => {
+  test('HOSTED.sessionStorePath should default to home dir path', () => {
+    delete process.env.SESSION_STORE_PATH;
     const config = require('../config');
-    expect(config.HOSTED_AUTH).toHaveProperty('enabled');
-    expect(config.HOSTED_AUTH).toHaveProperty('tenantId');
-    expect(config.HOSTED_AUTH).toHaveProperty('clientId');
+    expect(config.HOSTED.sessionStorePath).toMatch(/\.outlook-mcp-sessions\.json$/);
+  });
+
+  test('HOSTED.sessionStorePath should reflect env var', () => {
+    process.env.SESSION_STORE_PATH = '/custom/path/sessions.json';
+    const config = require('../config');
+    expect(config.HOSTED.sessionStorePath).toBe('/custom/path/sessions.json');
+  });
+
+  test('HOSTED.hostedRedirectUri should default to empty string', () => {
+    delete process.env.HOSTED_REDIRECT_URI;
+    const config = require('../config');
+    expect(config.HOSTED.hostedRedirectUri).toBe('');
+  });
+
+  test('HOSTED.hostedRedirectUri should reflect env var', () => {
+    process.env.HOSTED_REDIRECT_URI = 'https://myserver.com/auth/callback';
+    const config = require('../config');
+    expect(config.HOSTED.hostedRedirectUri).toBe('https://myserver.com/auth/callback');
+  });
+
+  // ── AUTH_CONFIG hosted fields ─────────────────────────────────
+
+  test('AUTH_CONFIG.hostedRedirectUri should default to empty string', () => {
+    delete process.env.HOSTED_REDIRECT_URI;
+    const config = require('../config');
+    expect(config.AUTH_CONFIG.hostedRedirectUri).toBe('');
+  });
+
+  test('AUTH_CONFIG.hostedRedirectUri should reflect env var', () => {
+    process.env.HOSTED_REDIRECT_URI = 'https://myserver.com/auth/callback';
+    const config = require('../config');
+    expect(config.AUTH_CONFIG.hostedRedirectUri).toBe('https://myserver.com/auth/callback');
+  });
+
+  test('AUTH_CONFIG.hostedTokenStorePath should default to home dir path', () => {
+    delete process.env.TOKEN_STORE_PATH;
+    const config = require('../config');
+    expect(config.AUTH_CONFIG.hostedTokenStorePath).toMatch(/\.outlook-mcp-hosted-tokens\.json$/);
+  });
+
+  test('AUTH_CONFIG.hostedTokenStorePath should reflect env var', () => {
+    process.env.TOKEN_STORE_PATH = '/custom/path/tokens.json';
+    const config = require('../config');
+    expect(config.AUTH_CONFIG.hostedTokenStorePath).toBe('/custom/path/tokens.json');
   });
 });

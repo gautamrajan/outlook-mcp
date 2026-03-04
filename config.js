@@ -20,13 +20,13 @@ module.exports = {
   MCP_TRANSPORT: process.env.MCP_TRANSPORT || 'stdio',  // 'stdio' or 'http'
   PORT: parseInt(process.env.PORT, 10) || 3000,
 
-  // Hosted mode auth
-  HOSTED_AUTH: {
+  // Hosted mode configuration
+  HOSTED: {
     enabled: (process.env.MCP_TRANSPORT || 'stdio').toLowerCase() === 'http',
-    tenantId: process.env.OUTLOOK_TENANT_ID || process.env.MS_TENANT_ID || 'common',
-    clientId: process.env.OUTLOOK_CLIENT_ID || process.env.MS_CLIENT_ID || '',
-    // Note: clientId and clientSecret are shared with AUTH_CONFIG — that's fine,
-    // it's the same Entra app registration for both modes
+    tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY || '',
+    tokenStorePath: process.env.TOKEN_STORE_PATH || path.join(homeDir, '.outlook-mcp-hosted-tokens.json'),
+    sessionStorePath: process.env.SESSION_STORE_PATH || path.join(homeDir, '.outlook-mcp-sessions.json'),
+    hostedRedirectUri: process.env.HOSTED_REDIRECT_URI || '',  // e.g. https://myserver.com/auth/callback
   },
 
   // Authentication configuration
@@ -38,7 +38,9 @@ module.exports = {
     redirectUri: 'http://localhost:3333/auth/callback',
     scopes: ['offline_access', 'Mail.Read', 'Mail.ReadWrite', 'User.Read', 'Calendars.Read', 'Calendars.ReadWrite', 'Contacts.Read'],
     tokenStorePath: path.join(homeDir, '.outlook-mcp-tokens.json'),
-    authServerUrl: 'http://localhost:3333'
+    authServerUrl: 'http://localhost:3333',
+    hostedRedirectUri: process.env.HOSTED_REDIRECT_URI || '',
+    hostedTokenStorePath: process.env.TOKEN_STORE_PATH || path.join(homeDir, '.outlook-mcp-hosted-tokens.json'),
   },
   
   // Microsoft Graph API

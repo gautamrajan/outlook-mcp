@@ -1,321 +1,669 @@
 /**
- * Integration tests for the dual-mode authentication flow.
+ * Integration tests for the full hosted auth flow.
  *
- * Tests the full auth flow end-to-end using:
- *   - REAL: auth/request-context.js (AsyncLocalStorage)
- *   - REAL: auth/per-user-token-storage.js (in-memory cache)
- *   - REAL: auth/index.js (ensureAuthenticated — the system under test)
- *   - MOCKED: auth/obo-exchange.js (exchangeOBO — external HTTP calls)
- *   - MOCKED: auth/token-storage.js (TokenStorage — file I/O)
+ * These tests wire together REAL instances of PerUserTokenStorage, SessionStore,
+ * createAuthRoutes, createHttpApp, and ensureAuthenticated — verifying the
+ * end-to-end hosted multi-user auth flow without hitting real Entra/Graph
+ * endpoints (fetch is mocked for external calls).
  *
- * Because auth/index.js creates singletons at require time, we use
- * jest.resetModules() in beforeEach and re-require everything fresh.
+ * Strategy:
+ *   - PerUserTokenStorage and SessionStore are real in-memory instances (no filePath)
+ *   - supertest for HTTP-level assertions
+ *   - global.fetch mocked for Entra token endpoint + Graph /me calls
+ *   - AsyncLocalStorage requestContext used to set user context for
+ *     ensureAuthenticated tests
  */
 
-let ensureAuthenticated;
-let requestContext;
-let perUserTokenStorage; // the real singleton instance from auth/index.js
-let mockExchangeOBO;
-let mockTokenStorageInstance;
+const crypto = require('crypto');
+const supertest = require('supertest');
+const express = require('express');
 
-beforeEach(() => {
-  jest.resetModules();
-  jest.clearAllMocks();
+const PerUserTokenStorage = require('../../auth/per-user-token-storage');
+const SessionStore = require('../../auth/session-store');
+const { createAuthRoutes, _pendingAuth } = require('../../auth/auth-routes');
 
-  // ── Mocks ──────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────
 
-  // Mock config
-  jest.mock('../../config', () => ({
-    AUTH_CONFIG: {
-      tokenStorePath: '/tmp/test-tokens.json',
-      clientId: 'integration-client-id',
-      clientSecret: 'integration-client-secret',
-      tenantId: 'integration-tenant-id',
-      tokenEndpoint: 'https://login.microsoftonline.com/integration-tenant-id/oauth2/v2.0/token',
-      redirectUri: 'http://localhost:3333/auth/callback',
-      scopes: ['offline_access', 'Mail.Read', 'Mail.ReadWrite', 'User.Read', 'Calendars.Read'],
-    },
-  }));
+/** Save and restore global.fetch across tests. */
+const originalFetch = global.fetch;
 
-  // Mock auth tools (avoid pulling in embedded-server, etc.)
-  jest.mock('../../auth/tools', () => ({
-    authTools: [{ name: 'mock-tool' }],
-  }));
-
-  // Mock TokenStorage — local mode uses this
-  mockTokenStorageInstance = {
-    getValidAccessToken: jest.fn(),
-    invalidateAccessToken: jest.fn(),
-  };
-  jest.mock('../../auth/token-storage', () => {
-    return jest.fn().mockImplementation(() => mockTokenStorageInstance);
-  });
-
-  // Mock OBO exchange — hosted mode uses this
-  mockExchangeOBO = jest.fn();
-  jest.mock('../../auth/obo-exchange', () => ({
-    exchangeOBO: mockExchangeOBO,
-  }));
-
-  // DO NOT mock request-context or per-user-token-storage — use the real ones
-
-  // ── Require fresh ──────────────────────────────────────────────────
-
-  const authModule = require('../../auth/index');
-  ensureAuthenticated = authModule.ensureAuthenticated;
-
-  // Get the real request-context instance (same one auth/index.js uses)
-  const rc = require('../../auth/request-context');
-  requestContext = rc.requestContext;
-
-  // Get the real PerUserTokenStorage singleton.
-  // auth/index.js creates it internally; we can observe its effects
-  // through ensureAuthenticated's behaviour.
-  // We also get a direct reference via the module's internal import
-  // to verify caching behaviour.
-  const PerUserTokenStorage = require('../../auth/per-user-token-storage');
-  // The singleton is created inside auth/index.js, so we access it indirectly.
-  // For assertion purposes, we'll rely on observing OBO call counts.
-});
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-function makeOBOResponse(suffix = '') {
+/**
+ * Build a mock config object matching what auth-routes and auth/index expect.
+ * Prefixed with "mock" so Jest allows it inside jest.mock() factories.
+ */
+function mockBuildTestConfig() {
   return {
-    access_token: `graph-token${suffix}`,
-    refresh_token: `graph-refresh${suffix}`,
-    expires_in: 3600,
-    scope: 'Mail.Read Mail.ReadWrite User.Read Calendars.Read',
-    token_type: 'Bearer',
+    AUTH_CONFIG: {
+      clientId: 'integ-client-id',
+      clientSecret: 'integ-client-secret',
+      tenantId: 'integ-tenant-id',
+      tokenEndpoint: 'https://login.microsoftonline.com/integ-tenant-id/oauth2/v2.0/token',
+      redirectUri: 'http://localhost:3333/auth/callback',
+      hostedRedirectUri: 'https://outlook-mcp.example.com/auth/callback',
+      scopes: ['offline_access', 'Mail.Read', 'User.Read'],
+      tokenStorePath: '/tmp/integ-test-tokens.json',
+      hostedTokenStorePath: '/tmp/integ-test-hosted-tokens.json',
+    },
+    SERVER_NAME: 'outlook-assistant-integ',
+    SERVER_VERSION: '1.0.0-test',
   };
 }
 
-// ── Hosted Mode (inside requestContext.run) ──────────────────────────
+/**
+ * Creates a mock fetch function for Entra token + Graph /me endpoints.
+ */
+function createMockFetch({
+  tokenResponse = {
+    access_token: 'integ-access-token',
+    refresh_token: 'integ-refresh-token',
+    expires_in: 3600,
+    scope: 'offline_access Mail.Read User.Read',
+  },
+  tokenStatus = 200,
+  meResponse = {
+    id: 'user-oid-integ-1',
+    mail: 'integuser@example.com',
+    displayName: 'Integration User',
+  },
+  meStatus = 200,
+} = {}) {
+  return jest.fn().mockImplementation((url) => {
+    if (typeof url === 'string' && url.includes('oauth2/v2.0/token')) {
+      return Promise.resolve({
+        ok: tokenStatus >= 200 && tokenStatus < 300,
+        status: tokenStatus,
+        text: () => Promise.resolve(JSON.stringify(tokenResponse)),
+        json: () => Promise.resolve(tokenResponse),
+      });
+    }
+    if (typeof url === 'string' && url.includes('graph.microsoft.com')) {
+      return Promise.resolve({
+        ok: meStatus >= 200 && meStatus < 300,
+        status: meStatus,
+        text: () => Promise.resolve(JSON.stringify(meResponse)),
+        json: () => Promise.resolve(meResponse),
+      });
+    }
+    return Promise.reject(new Error(`Unexpected fetch URL: ${url}`));
+  });
+}
 
-describe('Hosted mode — end-to-end auth flow', () => {
-  const userCtx = { userId: 'user-hosted-001', entraToken: 'entra-jwt-hosted-001' };
+/**
+ * Creates a SessionStore with file persistence disabled.
+ * SessionStore's constructor defaults filePath to a real path on disk,
+ * so we neutralize it after construction.
+ */
+function createInMemorySessionStore() {
+  const store = new SessionStore({});
+  store.filePath = null;
+  // Override saveToFile to be a no-op for in-memory operation
+  store.saveToFile = async () => {};
+  return store;
+}
 
-  test('first call triggers OBO exchange and returns Graph token', async () => {
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse());
+// ── Test suite ───────────────────────────────────────────────────────────
 
-    const token = await requestContext.run(userCtx, async () => {
-      return ensureAuthenticated();
-    });
-
-    expect(token).toBe('graph-token');
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(1);
-    expect(mockExchangeOBO).toHaveBeenCalledWith(
-      'entra-jwt-hosted-001',
-      expect.objectContaining({
-        clientId: 'integration-client-id',
-        clientSecret: 'integration-client-secret',
-        tenantId: 'integration-tenant-id',
-      })
-    );
+describe('Hosted Auth Flow — Integration', () => {
+  afterEach(() => {
+    _pendingAuth.clear();
+    global.fetch = originalFetch;
   });
 
-  test('second call returns cached token without calling OBO again', async () => {
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse());
+  // ════════════════════════════════════════════════════════════════════════
+  // HTTP layer — session middleware on /mcp
+  // ════════════════════════════════════════════════════════════════════════
 
-    // First call — populates cache
-    await requestContext.run(userCtx, async () => {
-      return ensureAuthenticated();
+  describe('HTTP layer', () => {
+    let createHttpApp;
+
+    beforeEach(() => {
+      jest.resetModules();
+
+      // Mock MCP SDK
+      jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
+        Server: jest.fn().mockImplementation(() => ({
+          connect: jest.fn().mockResolvedValue(undefined),
+          close: jest.fn().mockResolvedValue(undefined),
+          fallbackRequestHandler: null,
+        })),
+      }));
+
+      jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
+        StreamableHTTPServerTransport: jest.fn().mockImplementation(() => ({
+          handleRequest: jest.fn().mockImplementation((_req, res) => {
+            if (!res.headersSent) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ jsonrpc: '2.0', result: {} }));
+            }
+          }),
+        })),
+      }));
+
+      jest.mock('../../config', () => mockBuildTestConfig());
+
+      createHttpApp = require('../../transport/http-server').createHttpApp;
     });
 
-    // Second call — should use cache
-    const token = await requestContext.run(userCtx, async () => {
-      return ensureAuthenticated();
+    afterEach(() => {
+      jest.restoreAllMocks();
     });
 
-    expect(token).toBe('graph-token');
-    // OBO should only have been called once (during the first call)
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(1);
+    test('1. Unauthenticated request → 401 with auth URL', async () => {
+      const sessionStore = createInMemorySessionStore();
+      const app = createHttpApp({ sessionStore });
+
+      const res = await supertest(app)
+        .post('/mcp')
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          error: 'auth_required',
+          authUrl: '/auth/login',
+        }),
+      );
+      expect(res.body.message).toBeDefined();
+    });
+
+    test('2. Valid session token → request proceeds (200)', async () => {
+      const sessionStore = createInMemorySessionStore();
+      const sessionToken = await sessionStore.createSession('user-integ-abc');
+      const app = createHttpApp({ sessionStore });
+
+      const res = await supertest(app)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${sessionToken}`)
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+
+      expect(res.status).toBe(200);
+    });
+
+    test('3. Invalid/expired session token → 401', async () => {
+      const sessionStore = createInMemorySessionStore();
+      const app = createHttpApp({ sessionStore });
+
+      const res = await supertest(app)
+        .post('/mcp')
+        .set('Authorization', 'Bearer totally-bogus-token')
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('auth_required');
+    });
+
+    test('3b. Expired session → 401', async () => {
+      const sessionStore = createInMemorySessionStore();
+      // Create a session that expires immediately (0 days)
+      const token = await sessionStore.createSession('user-expired', { expiresInDays: 0 });
+      const app = createHttpApp({ sessionStore });
+
+      const res = await supertest(app)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('auth_required');
+    });
   });
 
-  test('forceRefresh invalidates cache and triggers fresh OBO exchange', async () => {
-    mockExchangeOBO
-      .mockResolvedValueOnce(makeOBOResponse('-v1'))
-      .mockResolvedValueOnce(makeOBOResponse('-v2'));
+  // ════════════════════════════════════════════════════════════════════════
+  // Browser auth flow — /auth/login and /auth/callback
+  // ════════════════════════════════════════════════════════════════════════
 
-    // First call — populates cache
-    const token1 = await requestContext.run(userCtx, async () => {
-      return ensureAuthenticated();
-    });
-    expect(token1).toBe('graph-token-v1');
+  describe('Browser auth flow', () => {
+    let tokenStorage;
+    let sessionStore;
+    let mockFetch;
+    let app;
 
-    // Force refresh — should invalidate and call OBO again
-    const token2 = await requestContext.run(userCtx, async () => {
-      return ensureAuthenticated({ forceRefresh: true });
+    beforeEach(() => {
+      tokenStorage = new PerUserTokenStorage(); // in-memory, no filePath
+      sessionStore = createInMemorySessionStore();
+      mockFetch = createMockFetch();
+
+      app = express();
+      const router = createAuthRoutes({
+        tokenStorage,
+        sessionStore,
+        config: mockBuildTestConfig(),
+        fetch: mockFetch,
+      });
+      app.use('/auth', router);
     });
-    expect(token2).toBe('graph-token-v2');
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(2);
+
+    test('4. GET /auth/login → 302 redirect to Entra with correct params', async () => {
+      const res = await supertest(app)
+        .get('/auth/login')
+        .expect(302);
+
+      const location = res.headers.location;
+      expect(location).toContain(
+        'https://login.microsoftonline.com/integ-tenant-id/oauth2/v2.0/authorize',
+      );
+
+      const url = new URL(location);
+      const params = url.searchParams;
+
+      expect(params.get('client_id')).toBe('integ-client-id');
+      expect(params.get('response_type')).toBe('code');
+      expect(params.get('redirect_uri')).toBe('https://outlook-mcp.example.com/auth/callback');
+      expect(params.get('scope')).toBe('offline_access Mail.Read User.Read');
+      expect(params.get('code_challenge_method')).toBe('S256');
+
+      // PKCE: state and challenge must be present
+      const state = params.get('state');
+      const challenge = params.get('code_challenge');
+      expect(state).toBeTruthy();
+      expect(challenge).toBeTruthy();
+
+      // Verify the challenge matches the stored verifier
+      const pending = _pendingAuth.get(state);
+      expect(pending).toBeDefined();
+      const expectedChallenge = crypto
+        .createHash('sha256')
+        .update(pending.codeVerifier)
+        .digest('base64url');
+      expect(challenge).toBe(expectedChallenge);
+    });
+
+    test('5. Full /auth/callback → tokens stored, session created, HTML has token', async () => {
+      // Step 1: /auth/login to get state
+      const loginRes = await supertest(app).get('/auth/login').expect(302);
+      const loginUrl = new URL(loginRes.headers.location);
+      const state = loginUrl.searchParams.get('state');
+
+      // Step 2: /auth/callback with code + state
+      const callbackRes = await supertest(app)
+        .get('/auth/callback')
+        .query({ code: 'integ-auth-code', state })
+        .expect(200);
+
+      // Verify tokens were stored in the REAL PerUserTokenStorage
+      const storedToken = tokenStorage.getTokenForUser('user-oid-integ-1');
+      expect(storedToken).toBe('integ-access-token');
+
+      const refreshToken = tokenStorage.getRefreshToken('user-oid-integ-1');
+      expect(refreshToken).toBe('integ-refresh-token');
+
+      const userInfo = tokenStorage.getUserInfo('user-oid-integ-1');
+      expect(userInfo.email).toBe('integuser@example.com');
+      expect(userInfo.name).toBe('Integration User');
+
+      // Verify session was created in the REAL SessionStore
+      expect(sessionStore.getSessionCountForUser('user-oid-integ-1')).toBe(1);
+
+      // Verify HTML response contains the session token
+      const html = callbackRes.text;
+      expect(html).toContain('Authentication Successful');
+      expect(html).toContain('Integration User');
+
+      // Verify the session resolves in SessionStore
+      const activeSessions = sessionStore.getActiveSessions();
+      expect(activeSessions.length).toBe(1);
+      expect(activeSessions[0].userId).toBe('user-oid-integ-1');
+    });
+
+    test('5b. Callback stores tokens that are retrievable and non-expired', async () => {
+      const loginRes = await supertest(app).get('/auth/login').expect(302);
+      const state = new URL(loginRes.headers.location).searchParams.get('state');
+
+      await supertest(app)
+        .get('/auth/callback')
+        .query({ code: 'integ-auth-code', state })
+        .expect(200);
+
+      // Token should NOT be expired (was just stored with 3600s expiry)
+      expect(tokenStorage.isTokenExpired('user-oid-integ-1')).toBe(false);
+    });
   });
 
-  test('two different users in concurrent contexts get independent tokens', async () => {
-    const userA = { userId: 'user-A', entraToken: 'entra-A' };
-    const userB = { userId: 'user-B', entraToken: 'entra-B' };
+  // ════════════════════════════════════════════════════════════════════════
+  // ensureAuthenticated hosted path
+  // ════════════════════════════════════════════════════════════════════════
 
-    mockExchangeOBO
-      .mockImplementation(async (entraToken) => {
-        // Return different tokens based on the input entra token
-        if (entraToken === 'entra-A') {
-          return makeOBOResponse('-A');
-        }
-        return makeOBOResponse('-B');
+  describe('ensureAuthenticated hosted path', () => {
+    // After jest.resetModules(), both auth/index.js and our test must share
+    // the SAME request-context module instance so that requestContext.run()
+    // in the test is visible to isHostedMode() inside auth/index.js.
+
+    let ensureAuthenticated;
+    let setHostedTokenStorage;
+    let perUserStorage;
+    let requestContext; // re-required after resetModules
+
+    beforeEach(() => {
+      jest.resetModules();
+      global.fetch = jest.fn();
+
+      jest.mock('../../auth/tools', () => ({
+        authTools: [{ name: 'mock-tool' }],
+      }));
+
+      jest.mock('../../config', () => mockBuildTestConfig());
+
+      // Mock TokenStorage (local mode) so it doesn't try to read files
+      jest.mock('../../auth/token-storage', () => {
+        return jest.fn().mockImplementation(() => ({
+          getValidAccessToken: jest.fn().mockResolvedValue(null),
+          invalidateAccessToken: jest.fn(),
+        }));
       });
 
-    // Run both in parallel
-    const [tokenA, tokenB] = await Promise.all([
-      requestContext.run(userA, async () => {
-        // Yield to allow interleaving
-        await new Promise((resolve) => setImmediate(resolve));
-        return ensureAuthenticated();
-      }),
-      requestContext.run(userB, async () => {
-        await new Promise((resolve) => setImmediate(resolve));
-        return ensureAuthenticated();
-      }),
-    ]);
+      // Real per-user storage (in-memory)
+      perUserStorage = new PerUserTokenStorage();
 
-    expect(tokenA).toBe('graph-token-A');
-    expect(tokenB).toBe('graph-token-B');
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(2);
+      // Re-require request-context so we get the SAME instance as auth/index.js
+      requestContext = require('../../auth/request-context').requestContext;
 
-    // Verify each OBO call used the correct entra token
-    const oboCallTokens = mockExchangeOBO.mock.calls.map((c) => c[0]);
-    expect(oboCallTokens).toContain('entra-A');
-    expect(oboCallTokens).toContain('entra-B');
+      // Require auth module fresh (it will use the same request-context)
+      const authModule = require('../../auth/index');
+      ensureAuthenticated = authModule.ensureAuthenticated;
+      setHostedTokenStorage = authModule.setHostedTokenStorage;
+
+      // Inject our in-memory storage
+      setHostedTokenStorage(perUserStorage);
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    test('6. Valid token → returns access token without network calls', async () => {
+      await perUserStorage.setTokensForUser('user-A', {
+        accessToken: 'valid-access-A',
+        refreshToken: 'refresh-A',
+        expiresIn: 3600,
+        scopes: 'Mail.Read User.Read',
+        email: 'a@example.com',
+        name: 'User A',
+      });
+
+      let result;
+      await requestContext.run({ userId: 'user-A' }, async () => {
+        result = await ensureAuthenticated();
+      });
+
+      expect(result).toBe('valid-access-A');
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('7. Expired token + valid refresh → silent refresh returns new token', async () => {
+      await perUserStorage.setTokensForUser('user-B', {
+        accessToken: 'expired-access-B',
+        refreshToken: 'valid-refresh-B',
+        expiresIn: 0, // immediately expired due to 5-min buffer
+        scopes: 'Mail.Read User.Read',
+        email: 'b@example.com',
+        name: 'User B',
+      });
+
+      // Mock fetch to return new tokens from Entra
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          access_token: 'refreshed-access-B',
+          refresh_token: 'rotated-refresh-B',
+          expires_in: 3600,
+          scope: 'Mail.Read User.Read',
+        }),
+      });
+
+      let result;
+      await requestContext.run({ userId: 'user-B' }, async () => {
+        result = await ensureAuthenticated();
+      });
+
+      expect(result).toBe('refreshed-access-B');
+
+      // Verify fetch was called to the token endpoint
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const [fetchUrl, fetchOpts] = global.fetch.mock.calls[0];
+      expect(fetchUrl).toContain('oauth2/v2.0/token');
+      expect(fetchOpts.method).toBe('POST');
+      expect(fetchOpts.body).toContain('grant_type=refresh_token');
+      expect(fetchOpts.body).toContain('refresh_token=valid-refresh-B');
+
+      // Verify new tokens are persisted in storage
+      const newToken = perUserStorage.getTokenForUser('user-B');
+      expect(newToken).toBe('refreshed-access-B');
+      const newRefresh = perUserStorage.getRefreshToken('user-B');
+      expect(newRefresh).toBe('rotated-refresh-B');
+    });
+
+    test('8. Expired token + no refresh → AUTH_REQUIRED error', async () => {
+      await perUserStorage.setTokensForUser('user-C', {
+        accessToken: 'expired-access-C',
+        refreshToken: null,
+        expiresIn: 0,
+        scopes: 'Mail.Read User.Read',
+        email: 'c@example.com',
+        name: 'User C',
+      });
+
+      let error;
+      await requestContext.run({ userId: 'user-C' }, async () => {
+        try {
+          await ensureAuthenticated();
+        } catch (e) {
+          error = e;
+        }
+      });
+
+      expect(error).toBeDefined();
+      expect(error.code).toBe('AUTH_REQUIRED');
+      expect(error.message).toContain('Authentication required');
+    });
+
+    test('9. Two users → independent token stores return correct tokens', async () => {
+      await perUserStorage.setTokensForUser('user-X', {
+        accessToken: 'token-for-X',
+        refreshToken: 'refresh-X',
+        expiresIn: 3600,
+        scopes: 'Mail.Read',
+        email: 'x@example.com',
+        name: 'User X',
+      });
+
+      await perUserStorage.setTokensForUser('user-Y', {
+        accessToken: 'token-for-Y',
+        refreshToken: 'refresh-Y',
+        expiresIn: 3600,
+        scopes: 'Mail.Read',
+        email: 'y@example.com',
+        name: 'User Y',
+      });
+
+      let resultX, resultY;
+
+      await requestContext.run({ userId: 'user-X' }, async () => {
+        resultX = await ensureAuthenticated();
+      });
+
+      await requestContext.run({ userId: 'user-Y' }, async () => {
+        resultY = await ensureAuthenticated();
+      });
+
+      expect(resultX).toBe('token-for-X');
+      expect(resultY).toBe('token-for-Y');
+      expect(resultX).not.toBe(resultY);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('7b. Refresh failure → AUTH_REQUIRED error', async () => {
+      await perUserStorage.setTokensForUser('user-D', {
+        accessToken: 'expired-access-D',
+        refreshToken: 'bad-refresh-D',
+        expiresIn: 0,
+        scopes: 'Mail.Read',
+        email: 'd@example.com',
+        name: 'User D',
+      });
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ error: 'invalid_grant' }),
+      });
+
+      let error;
+      await requestContext.run({ userId: 'user-D' }, async () => {
+        try {
+          await ensureAuthenticated();
+        } catch (e) {
+          error = e;
+        }
+      });
+
+      expect(error).toBeDefined();
+      expect(error.code).toBe('AUTH_REQUIRED');
+    });
   });
 
-  test('user A cached token is not returned to user B', async () => {
-    const userA = { userId: 'user-A', entraToken: 'entra-A' };
-    const userB = { userId: 'user-B', entraToken: 'entra-B' };
+  // ════════════════════════════════════════════════════════════════════════
+  // Local mode isolation
+  // ════════════════════════════════════════════════════════════════════════
 
-    mockExchangeOBO
-      .mockResolvedValueOnce(makeOBOResponse('-A'))
-      .mockResolvedValueOnce(makeOBOResponse('-B'));
+  describe('Local mode isolation', () => {
+    test('10. Without hosted context, ensureAuthenticated uses local TokenStorage', async () => {
+      jest.resetModules();
 
-    // Populate cache for user A
-    await requestContext.run(userA, () => ensureAuthenticated());
+      const mockGetValidAccessToken = jest.fn().mockResolvedValue('local-access-token');
 
-    // User B should trigger a new OBO (not get user A's cached token)
-    const tokenB = await requestContext.run(userB, () => ensureAuthenticated());
+      jest.mock('../../auth/tools', () => ({
+        authTools: [{ name: 'mock-tool' }],
+      }));
 
-    expect(tokenB).toBe('graph-token-B');
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(2);
+      jest.mock('../../config', () => mockBuildTestConfig());
+
+      jest.mock('../../auth/token-storage', () => {
+        return jest.fn().mockImplementation(() => ({
+          getValidAccessToken: mockGetValidAccessToken,
+          invalidateAccessToken: jest.fn(),
+        }));
+      });
+
+      const { ensureAuthenticated } = require('../../auth/index');
+
+      // Call WITHOUT requestContext.run → isHostedMode() returns false
+      const result = await ensureAuthenticated();
+
+      expect(result).toBe('local-access-token');
+      expect(mockGetValidAccessToken).toHaveBeenCalledTimes(1);
+    });
+
+    test('10b. Local mode: no token → throws Authentication required', async () => {
+      jest.resetModules();
+
+      const mockGetValidAccessToken = jest.fn().mockResolvedValue(null);
+
+      jest.mock('../../auth/tools', () => ({
+        authTools: [{ name: 'mock-tool' }],
+      }));
+
+      jest.mock('../../config', () => mockBuildTestConfig());
+
+      jest.mock('../../auth/token-storage', () => {
+        return jest.fn().mockImplementation(() => ({
+          getValidAccessToken: mockGetValidAccessToken,
+          invalidateAccessToken: jest.fn(),
+        }));
+      });
+
+      const { ensureAuthenticated } = require('../../auth/index');
+
+      await expect(ensureAuthenticated()).rejects.toThrow('Authentication required');
+    });
   });
 
-  test('OBO exchange failure propagates as error', async () => {
-    mockExchangeOBO.mockRejectedValue(
-      new Error('OBO exchange failed: invalid or expired user token')
-    );
+  // ════════════════════════════════════════════════════════════════════════
+  // End-to-end: browser auth → session → MCP request
+  // ════════════════════════════════════════════════════════════════════════
 
-    await expect(
-      requestContext.run(userCtx, () => ensureAuthenticated())
-    ).rejects.toThrow('OBO exchange failed: invalid or expired user token');
-  });
+  describe('End-to-end: auth flow → MCP request', () => {
+    test('user authenticates via browser then uses session token for MCP', async () => {
+      jest.resetModules();
 
-  test('hosted mode does NOT interact with singleton TokenStorage', async () => {
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse());
+      // Mock MCP SDK
+      jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
+        Server: jest.fn().mockImplementation(() => ({
+          connect: jest.fn().mockResolvedValue(undefined),
+          close: jest.fn().mockResolvedValue(undefined),
+          fallbackRequestHandler: null,
+        })),
+      }));
 
-    await requestContext.run(userCtx, () => ensureAuthenticated());
+      jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
+        StreamableHTTPServerTransport: jest.fn().mockImplementation(() => ({
+          handleRequest: jest.fn().mockImplementation((_req, res) => {
+            if (!res.headersSent) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ jsonrpc: '2.0', result: { ok: true } }));
+            }
+          }),
+        })),
+      }));
 
-    expect(mockTokenStorageInstance.getValidAccessToken).not.toHaveBeenCalled();
-    expect(mockTokenStorageInstance.invalidateAccessToken).not.toHaveBeenCalled();
-  });
+      jest.mock('../../config', () => mockBuildTestConfig());
 
-  test('offline_access is filtered from OBO scopes', async () => {
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse());
+      const { createHttpApp } = require('../../transport/http-server');
+      const { createAuthRoutes: freshCreateAuthRoutes, _pendingAuth: freshPending } =
+        require('../../auth/auth-routes');
 
-    await requestContext.run(userCtx, () => ensureAuthenticated());
+      const tokenStorage = new PerUserTokenStorage();
+      const sessionStore = createInMemorySessionStore();
+      const mockFetch = createMockFetch();
 
-    const oboConfig = mockExchangeOBO.mock.calls[0][1];
-    expect(oboConfig.scopes).not.toContain('offline_access');
-    expect(oboConfig.scopes).toContain('Mail.Read');
-    expect(oboConfig.scopes).toContain('User.Read');
-  });
-});
+      // Build combined app: auth routes + MCP routes with session middleware
+      const app = createHttpApp({ sessionStore });
+      const authRouter = freshCreateAuthRoutes({
+        tokenStorage,
+        sessionStore,
+        config: mockBuildTestConfig(),
+        fetch: mockFetch,
+      });
+      app.use('/auth', authRouter);
 
-// ── Local Mode (outside requestContext.run) ──────────────────────────
+      // Step 1: Browser visits /auth/login
+      const loginRes = await supertest(app).get('/auth/login').expect(302);
+      const state = new URL(loginRes.headers.location).searchParams.get('state');
 
-describe('Local mode — existing single-user flow', () => {
-  test('uses TokenStorage to get access token', async () => {
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-access-token');
+      // Step 2: Browser returns to /auth/callback
+      await supertest(app)
+        .get('/auth/callback')
+        .query({ code: 'e2e-auth-code', state })
+        .expect(200);
 
-    const token = await ensureAuthenticated();
+      // Get the full session token from the session store internals
+      const allEntries = Array.from(sessionStore._sessions.entries());
+      expect(allEntries.length).toBe(1);
+      const [fullSessionToken] = allEntries[0];
 
-    expect(token).toBe('local-access-token');
-    expect(mockTokenStorageInstance.getValidAccessToken).toHaveBeenCalledTimes(1);
-  });
+      // Step 3: Use session token to make an MCP request
+      const mcpRes = await supertest(app)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${fullSessionToken}`)
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
 
-  test('throws when TokenStorage returns null', async () => {
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue(null);
+      expect(mcpRes.status).toBe(200);
 
-    await expect(ensureAuthenticated()).rejects.toThrow('Authentication required');
-  });
+      // Step 4: Verify an unauthenticated request still fails
+      const unauthRes = await supertest(app)
+        .post('/mcp')
+        .set('Content-Type', 'application/json')
+        .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
 
-  test('forceRefresh invalidates then re-fetches via TokenStorage', async () => {
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('refreshed-local-token');
+      expect(unauthRes.status).toBe(401);
 
-    const token = await ensureAuthenticated({ forceRefresh: true });
-
-    expect(mockTokenStorageInstance.invalidateAccessToken).toHaveBeenCalledTimes(1);
-    expect(token).toBe('refreshed-local-token');
-  });
-
-  test('does NOT interact with per-user storage or OBO in local mode', async () => {
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
-
-    await ensureAuthenticated();
-
-    expect(mockExchangeOBO).not.toHaveBeenCalled();
-  });
-
-  test('does NOT touch OBO even with forceRefresh in local mode', async () => {
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
-
-    await ensureAuthenticated({ forceRefresh: true });
-
-    expect(mockExchangeOBO).not.toHaveBeenCalled();
-  });
-});
-
-// ── Mode isolation ───────────────────────────────────────────────────
-
-describe('Mode isolation', () => {
-  test('local call followed by hosted call uses correct path each time', async () => {
-    const userCtx = { userId: 'user-switch', entraToken: 'entra-switch' };
-
-    // Local call
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
-    const localToken = await ensureAuthenticated();
-    expect(localToken).toBe('local-token');
-
-    // Hosted call
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse('-hosted'));
-    const hostedToken = await requestContext.run(userCtx, () => ensureAuthenticated());
-    expect(hostedToken).toBe('graph-token-hosted');
-
-    // Verify both paths were used
-    expect(mockTokenStorageInstance.getValidAccessToken).toHaveBeenCalledTimes(1);
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(1);
-  });
-
-  test('hosted call followed by local call uses correct path each time', async () => {
-    const userCtx = { userId: 'user-switch-2', entraToken: 'entra-switch-2' };
-
-    // Hosted call
-    mockExchangeOBO.mockResolvedValue(makeOBOResponse('-hosted'));
-    const hostedToken = await requestContext.run(userCtx, () => ensureAuthenticated());
-    expect(hostedToken).toBe('graph-token-hosted');
-
-    // Local call
-    mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
-    const localToken = await ensureAuthenticated();
-    expect(localToken).toBe('local-token');
-
-    // Verify both paths were used
-    expect(mockExchangeOBO).toHaveBeenCalledTimes(1);
-    expect(mockTokenStorageInstance.getValidAccessToken).toHaveBeenCalledTimes(1);
+      // Cleanup
+      freshPending.clear();
+    });
   });
 });

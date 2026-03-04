@@ -142,7 +142,35 @@ if (transportMode === 'http') {
   // HTTP transport — delegated to transport/http-server.js
   // (Server + tools are created per-request there; the stdio Server above is unused)
   const { startHttpServer } = require('./transport/http-server');
-  startHttpServer();
+  const PerUserTokenStorage = require('./auth/per-user-token-storage');
+  const SessionStore = require('./auth/session-store');
+  const { setHostedTokenStorage } = require('./auth');
+
+  const hostedConfig = config.HOSTED;
+
+  // Instantiate stores with config-driven paths and encryption
+  const tokenStorage = new PerUserTokenStorage({
+    filePath: hostedConfig.tokenStorePath,
+    encryptionKey: hostedConfig.tokenEncryptionKey,
+  });
+  const sessionStore = new SessionStore({
+    filePath: hostedConfig.sessionStorePath,
+    encryptionKey: hostedConfig.tokenEncryptionKey,
+  });
+
+  // Load persisted state from disk, then start the server
+  Promise.all([tokenStorage.loadFromFile(), sessionStore.loadFromFile()])
+    .then(() => {
+      // Inject hosted token storage so ensureAuthenticated() can find it
+      setHostedTokenStorage(tokenStorage);
+
+      startHttpServer({ sessionStore, tokenStorage });
+      console.error('Hosted mode: stores loaded, server starting');
+    })
+    .catch((err) => {
+      console.error('Failed to load hosted stores:', err);
+      process.exit(1);
+    });
 } else {
   // stdio transport — original behaviour (default)
   process.on('SIGTERM', () => {

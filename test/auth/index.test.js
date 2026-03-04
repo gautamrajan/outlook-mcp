@@ -2,26 +2,34 @@
  * Tests for auth/index.js — ensureAuthenticated()
  *
  * Covers both local mode (existing singleton TokenStorage flow)
- * and hosted mode (OBO + per-user token storage).
+ * and hosted mode (per-user token lookup with silent refresh).
  *
  * Because auth/index.js creates singletons at require time, we use
  * jest.resetModules() in beforeEach and re-require everything fresh.
  * This ensures mock constructors are wired up before the module runs.
  */
 
+const PerUserTokenStorage = require('../../auth/per-user-token-storage');
+
 let ensureAuthenticated;
 let tokenStorage;
 let authTools;
+let getHostedTokenStorage;
+let setHostedTokenStorage;
 let requestContext;
-let exchangeOBO;
 
 // Mock instances (recreated each test)
 let mockTokenStorageInstance;
-let mockPerUserTokenStorageInstance;
+
+// Save original fetch so we can restore it
+const originalFetch = global.fetch;
 
 beforeEach(() => {
   jest.resetModules();
   jest.clearAllMocks();
+
+  // Reset global fetch mock
+  global.fetch = jest.fn();
 
   // Static mocks that don't need instance tracking
   jest.mock('../../auth/tools', () => ({
@@ -49,21 +57,6 @@ beforeEach(() => {
     return jest.fn().mockImplementation(() => mockTokenStorageInstance);
   });
 
-  // Set up PerUserTokenStorage mock constructor
-  mockPerUserTokenStorageInstance = {
-    getTokenForUser: jest.fn(),
-    setTokenForUser: jest.fn(),
-    invalidateUser: jest.fn(),
-  };
-  jest.mock('../../auth/per-user-token-storage', () => {
-    return jest.fn().mockImplementation(() => mockPerUserTokenStorageInstance);
-  });
-
-  // Mock OBO exchange
-  jest.mock('../../auth/obo-exchange', () => ({
-    exchangeOBO: jest.fn(),
-  }));
-
   // DO NOT mock request-context — it must be the real AsyncLocalStorage
   // so that requestContext.run() in tests sets context visible to auth/index.js
 
@@ -73,14 +66,16 @@ beforeEach(() => {
   ensureAuthenticated = authModule.ensureAuthenticated;
   tokenStorage = authModule.tokenStorage;
   authTools = authModule.authTools;
+  getHostedTokenStorage = authModule.getHostedTokenStorage;
+  setHostedTokenStorage = authModule.setHostedTokenStorage;
 
   // Get the same request-context instance that auth/index.js is using
   const rc = require('../../auth/request-context');
   requestContext = rc.requestContext;
+});
 
-  // Get the mocked exchangeOBO
-  const obo = require('../../auth/obo-exchange');
-  exchangeOBO = obo.exchangeOBO;
+afterEach(() => {
+  global.fetch = originalFetch;
 });
 
 describe('auth/index.js', () => {
@@ -100,6 +95,16 @@ describe('auth/index.js', () => {
     test('should export ensureAuthenticated function', () => {
       expect(ensureAuthenticated).toBeDefined();
       expect(typeof ensureAuthenticated).toBe('function');
+    });
+
+    test('should export getHostedTokenStorage function', () => {
+      expect(getHostedTokenStorage).toBeDefined();
+      expect(typeof getHostedTokenStorage).toBe('function');
+    });
+
+    test('should export setHostedTokenStorage function', () => {
+      expect(setHostedTokenStorage).toBeDefined();
+      expect(typeof setHostedTokenStorage).toBe('function');
     });
   });
 
@@ -146,140 +151,309 @@ describe('auth/index.js', () => {
       expect(mockTokenStorageInstance.invalidateAccessToken).not.toHaveBeenCalled();
     });
 
-    test('should NOT interact with per-user token storage in local mode', async () => {
+    test('should NOT interact with hosted mode path in local mode', async () => {
       mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
 
-      await ensureAuthenticated();
+      const token = await ensureAuthenticated();
 
-      expect(mockPerUserTokenStorageInstance.getTokenForUser).not.toHaveBeenCalled();
-      expect(mockPerUserTokenStorageInstance.setTokenForUser).not.toHaveBeenCalled();
-    });
-
-    test('should NOT call exchangeOBO in local mode', async () => {
-      mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token');
-
-      await ensureAuthenticated();
-
-      expect(exchangeOBO).not.toHaveBeenCalled();
+      expect(token).toBe('local-token');
+      // fetch should never be called for local mode
+      expect(global.fetch).not.toHaveBeenCalled();
     });
   });
 
   // ── Hosted Mode (user context present) ──────────────────────────────
 
   describe('hosted mode (user context present)', () => {
-    const testUserCtx = { userId: 'test-user-123', entraToken: 'entra-jwt-token' };
+    const TEST_USER_ID = 'test-user-123';
+    const testUserCtx = { userId: TEST_USER_ID, entraToken: 'entra-jwt-token' };
 
-    const mockOBOResponse = {
-      access_token: 'graph-token-from-obo',
-      refresh_token: 'graph-refresh-from-obo',
-      expires_in: 3600,
-      scope: 'Mail.Read Mail.ReadWrite User.Read Calendars.Read',
-      token_type: 'Bearer',
-    };
+    /** @type {PerUserTokenStorage} */
+    let hostedStorage;
 
-    test('should return cached Graph token from per-user storage if valid', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue('cached-graph-token');
+    /**
+     * Helper: pre-populate the hosted storage with token data for the test user.
+     */
+    async function seedTokens({ accessToken, refreshToken, expiresIn, email, name } = {}) {
+      await hostedStorage.setTokensForUser(TEST_USER_ID, {
+        accessToken: accessToken || 'stored-access-token',
+        refreshToken: refreshToken || 'stored-refresh-token',
+        expiresIn: expiresIn != null ? expiresIn : 3600,
+        scopes: 'Mail.Read Mail.ReadWrite User.Read Calendars.Read',
+        email: email || 'test@example.com',
+        name: name || 'Test User',
+      });
+    }
+
+    /**
+     * Helper: mock a successful token refresh response from Entra.
+     */
+    function mockSuccessfulRefresh(overrides = {}) {
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          access_token: overrides.access_token || 'new-access-token',
+          refresh_token: overrides.refresh_token || 'new-refresh-token',
+          expires_in: overrides.expires_in || 3600,
+          scope: overrides.scope || 'Mail.Read Mail.ReadWrite User.Read Calendars.Read',
+        }),
+      });
+    }
+
+    /**
+     * Helper: mock a failed token refresh response from Entra.
+     */
+    function mockFailedRefresh(status = 400) {
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status,
+        json: async () => ({ error: 'invalid_grant', error_description: 'Refresh token revoked' }),
+      });
+    }
+
+    beforeEach(() => {
+      // Create a fresh in-memory PerUserTokenStorage (no file path = no disk I/O)
+      hostedStorage = new PerUserTokenStorage();
+
+      // Inject it into auth/index.js so _ensureAuthenticatedHosted uses it
+      setHostedTokenStorage(hostedStorage);
+    });
+
+    // ── 1. Valid stored token ──────────────────────────────────────────
+
+    test('should return valid stored token directly without network call', async () => {
+      await seedTokens();
 
       const token = await requestContext.run(testUserCtx, async () => {
         return ensureAuthenticated();
       });
 
-      expect(token).toBe('cached-graph-token');
-      expect(mockPerUserTokenStorageInstance.getTokenForUser).toHaveBeenCalledWith('test-user-123');
-      expect(exchangeOBO).not.toHaveBeenCalled();
+      expect(token).toBe('stored-access-token');
+      expect(global.fetch).not.toHaveBeenCalled();
     });
 
-    test('should call OBO exchange when per-user token is null (missing)', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockResolvedValue(mockOBOResponse);
+    // ── 2. Expired token with valid refresh ────────────────────────────
+
+    test('should refresh expired token and return new access token', async () => {
+      // Seed with already-expired token (expiresIn = 0 means already expired)
+      await seedTokens({ expiresIn: 0 });
+
+      mockSuccessfulRefresh({ access_token: 'refreshed-access-token' });
 
       const token = await requestContext.run(testUserCtx, async () => {
         return ensureAuthenticated();
       });
 
-      expect(token).toBe('graph-token-from-obo');
-      expect(exchangeOBO).toHaveBeenCalledTimes(1);
-      expect(exchangeOBO).toHaveBeenCalledWith('entra-jwt-token', expect.objectContaining({
-        clientId: 'test-client-id',
-        clientSecret: 'test-client-secret',
-        tenantId: 'test-tenant-id',
-      }));
+      expect(token).toBe('refreshed-access-token');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+
+      // Verify the fetch was called with correct parameters
+      const [url, opts] = global.fetch.mock.calls[0];
+      expect(url).toBe('https://login.microsoftonline.com/test-tenant-id/oauth2/v2.0/token');
+      expect(opts.method).toBe('POST');
+      expect(opts.body).toContain('grant_type=refresh_token');
+      expect(opts.body).toContain('client_id=test-client-id');
+      expect(opts.body).toContain('client_secret=test-client-secret');
+      expect(opts.body).toContain('refresh_token=stored-refresh-token');
+      // offline_access should be excluded from scope
+      expect(opts.body).not.toContain('offline_access');
     });
 
-    test('should filter offline_access from OBO scopes', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockResolvedValue(mockOBOResponse);
+    test('should store new tokens after successful refresh', async () => {
+      await seedTokens({ expiresIn: 0 });
+
+      mockSuccessfulRefresh({
+        access_token: 'refreshed-access-token',
+        refresh_token: 'rotated-refresh-token',
+      });
 
       await requestContext.run(testUserCtx, async () => {
         return ensureAuthenticated();
       });
 
-      const oboConfig = exchangeOBO.mock.calls[0][1];
-      expect(oboConfig.scopes).not.toContain('offline_access');
-      expect(oboConfig.scopes).toContain('Mail.Read');
-      expect(oboConfig.scopes).toContain('Mail.ReadWrite');
-      expect(oboConfig.scopes).toContain('User.Read');
-      expect(oboConfig.scopes).toContain('Calendars.Read');
+      // Verify the new tokens are stored
+      const storedToken = hostedStorage.getTokenForUser(TEST_USER_ID);
+      expect(storedToken).toBe('refreshed-access-token');
+
+      const storedRefresh = hostedStorage.getRefreshToken(TEST_USER_ID);
+      expect(storedRefresh).toBe('rotated-refresh-token');
     });
 
-    test('should store OBO result in per-user storage after exchange', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockResolvedValue(mockOBOResponse);
+    test('should preserve original refresh token if Entra does not rotate it', async () => {
+      await seedTokens({ expiresIn: 0, refreshToken: 'original-refresh' });
+
+      // Entra response without refresh_token field
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          access_token: 'new-access',
+          expires_in: 3600,
+          scope: 'Mail.Read',
+          // no refresh_token — Entra did not rotate
+        }),
+      });
 
       await requestContext.run(testUserCtx, async () => {
         return ensureAuthenticated();
       });
 
-      expect(mockPerUserTokenStorageInstance.setTokenForUser).toHaveBeenCalledWith(
-        'test-user-123',
-        mockOBOResponse
-      );
+      const storedRefresh = hostedStorage.getRefreshToken(TEST_USER_ID);
+      expect(storedRefresh).toBe('original-refresh');
     });
 
-    test('should invalidate per-user token with forceRefresh, then do OBO exchange', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockResolvedValue(mockOBOResponse);
+    test('should preserve user info (email, name) after refresh', async () => {
+      await seedTokens({ expiresIn: 0, email: 'user@corp.com', name: 'Jane Doe' });
 
-      const token = await requestContext.run(testUserCtx, async () => {
-        return ensureAuthenticated({ forceRefresh: true });
+      mockSuccessfulRefresh();
+
+      await requestContext.run(testUserCtx, async () => {
+        return ensureAuthenticated();
       });
 
-      expect(mockPerUserTokenStorageInstance.invalidateUser).toHaveBeenCalledWith('test-user-123');
-      expect(token).toBe('graph-token-from-obo');
+      const info = hostedStorage.getUserInfo(TEST_USER_ID);
+      expect(info.email).toBe('user@corp.com');
+      expect(info.name).toBe('Jane Doe');
     });
 
-    test('should propagate OBO exchange failure as error', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockRejectedValue(new Error('OBO exchange failed: invalid or expired user token'));
+    // ── 3. Expired token with failed refresh ───────────────────────────
+
+    test('should throw AUTH_REQUIRED when refresh fails', async () => {
+      await seedTokens({ expiresIn: 0 });
+
+      mockFailedRefresh(400);
+
+      let caughtErr;
+      try {
+        await requestContext.run(testUserCtx, async () => {
+          return ensureAuthenticated();
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeDefined();
+      expect(caughtErr.message).toMatch(/Token refresh failed/);
+      expect(caughtErr.code).toBe('AUTH_REQUIRED');
+    });
+
+    // ── 4. No tokens at all for user ───────────────────────────────────
+
+    test('should throw AUTH_REQUIRED when no tokens exist for user', async () => {
+      // Don't seed any tokens — storage is empty
+
+      const promise = requestContext.run(testUserCtx, async () => {
+        return ensureAuthenticated();
+      });
+
+      await expect(promise).rejects.toThrow('Authentication required');
+
+      try {
+        await requestContext.run(testUserCtx, async () => {
+          return ensureAuthenticated();
+        });
+      } catch (err) {
+        expect(err.code).toBe('AUTH_REQUIRED');
+      }
+    });
+
+    // ── 5. No user context ─────────────────────────────────────────────
+
+    test('should throw when user context has no userId', async () => {
+      const badCtx = { userId: null, entraToken: 'jwt' };
 
       await expect(
-        requestContext.run(testUserCtx, async () => {
+        requestContext.run(badCtx, async () => {
           return ensureAuthenticated();
         })
-      ).rejects.toThrow('OBO exchange failed: invalid or expired user token');
+      ).rejects.toThrow('No user context');
     });
 
-    test('should NOT interact with the singleton TokenStorage in hosted mode', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue('cached-token');
+    // ── 6. forceRefresh=true ───────────────────────────────────────────
 
-      await requestContext.run(testUserCtx, async () => {
-        return ensureAuthenticated();
-      });
+    test('should skip cached token and refresh when forceRefresh is true', async () => {
+      // Seed with a perfectly valid (non-expired) token
+      await seedTokens({ expiresIn: 3600 });
 
-      expect(mockTokenStorageInstance.getValidAccessToken).not.toHaveBeenCalled();
-      expect(mockTokenStorageInstance.invalidateAccessToken).not.toHaveBeenCalled();
-    });
+      mockSuccessfulRefresh({ access_token: 'force-refreshed-token' });
 
-    test('should NOT interact with singleton TokenStorage even with forceRefresh in hosted mode', async () => {
-      mockPerUserTokenStorageInstance.getTokenForUser.mockReturnValue(null);
-      exchangeOBO.mockResolvedValue(mockOBOResponse);
-
-      await requestContext.run(testUserCtx, async () => {
+      const token = await requestContext.run(testUserCtx, async () => {
         return ensureAuthenticated({ forceRefresh: true });
       });
 
+      // Should NOT have returned the cached token
+      expect(token).toBe('force-refreshed-token');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    // ── 7. Concurrent refresh ──────────────────────────────────────────
+
+    test('should only make one refresh request for concurrent calls by same user', async () => {
+      await seedTokens({ expiresIn: 0 });
+
+      // Make fetch take a moment so both calls overlap
+      global.fetch.mockImplementation(() =>
+        new Promise(resolve =>
+          setTimeout(() => resolve({
+            ok: true,
+            json: async () => ({
+              access_token: 'concurrent-token',
+              refresh_token: 'concurrent-refresh',
+              expires_in: 3600,
+              scope: 'Mail.Read',
+            }),
+          }), 50)
+        )
+      );
+
+      const results = await requestContext.run(testUserCtx, async () => {
+        return Promise.all([
+          ensureAuthenticated(),
+          ensureAuthenticated(),
+        ]);
+      });
+
+      // Both should get the token
+      expect(results[0]).toBe('concurrent-token');
+      expect(results[1]).toBe('concurrent-token');
+
+      // Only one fetch call should have been made
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    // ── 8. Local mode completely unaffected ─────────────────────────────
+
+    test('should NOT interact with the singleton TokenStorage in hosted mode', async () => {
+      await seedTokens();
+
+      await requestContext.run(testUserCtx, async () => {
+        await ensureAuthenticated();
+      });
+
       expect(mockTokenStorageInstance.getValidAccessToken).not.toHaveBeenCalled();
       expect(mockTokenStorageInstance.invalidateAccessToken).not.toHaveBeenCalled();
+    });
+
+    // ── setHostedTokenStorage / getHostedTokenStorage ──────────────────
+
+    test('setHostedTokenStorage should allow injecting a custom storage instance', () => {
+      const customStorage = new PerUserTokenStorage();
+      setHostedTokenStorage(customStorage);
+
+      expect(getHostedTokenStorage()).toBe(customStorage);
+    });
+
+    test('getHostedTokenStorage should create a default instance when none injected', () => {
+      // Reset hosted storage to null
+      setHostedTokenStorage(null);
+
+      // Lazy initialization should create a new PerUserTokenStorage
+      const storage = getHostedTokenStorage();
+      expect(storage).toBeDefined();
+      // Verify it quacks like a PerUserTokenStorage (instanceof won't work across
+      // jest.resetModules() boundaries because two copies of the class exist)
+      expect(typeof storage.getTokenForUser).toBe('function');
+      expect(typeof storage.getRefreshToken).toBe('function');
+      expect(typeof storage.setTokensForUser).toBe('function');
     });
   });
 });

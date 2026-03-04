@@ -4,9 +4,9 @@
  * Strategy:
  *   - Mock the MCP SDK (Server, StreamableHTTPServerTransport) so we are
  *     testing OUR wiring, not the SDK internals.
- *   - Mock the Entra middleware so we can control auth pass/fail.
  *   - Use supertest to make real HTTP requests against the Express app.
  *   - Validate that request context (AsyncLocalStorage) is set correctly.
+ *   - Test session-token middleware rejects unauthenticated requests.
  */
 const http = require('http');
 const request = require('supertest');
@@ -40,20 +40,6 @@ jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   StreamableHTTPServerTransport: MockTransport,
 }));
 
-// Mock the Entra middleware — by default, let requests through
-const mockEntraMiddleware = jest.fn((req, res, next) => {
-  req.user = {
-    id: 'test-oid-001',
-    email: 'gau@mrc.com',
-    name: 'Gau Rajan',
-    token: 'fake-jwt-token',
-  };
-  next();
-});
-jest.mock('../../auth/entra-middleware', () => ({
-  createEntraMiddleware: jest.fn(() => mockEntraMiddleware),
-}));
-
 // Mock config
 jest.mock('../../config', () => ({
   SERVER_NAME: 'test-outlook-assistant',
@@ -68,7 +54,7 @@ jest.mock('../../config', () => ({
 const { requestContext, getUserContext } = require('../../auth/request-context');
 
 // ── Import under test (after all mocks) ──────────────────────────────
-const { createHttpApp, startHttpServer } = require('../../transport/http-server');
+const { createHttpApp, startHttpServer, createSessionMiddleware } = require('../../transport/http-server');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -84,6 +70,29 @@ function initializeBody() {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'test-client', version: '0.1.0' },
+    },
+  };
+}
+
+/**
+ * Create a minimal mock SessionStore for testing.
+ */
+function createMockSessionStore() {
+  const sessions = new Map();
+  return {
+    _sessions: sessions,
+    validateSession: jest.fn((token) => {
+      return sessions.get(token) || null;
+    }),
+    /** Helper to seed a valid session for testing. */
+    _addSession(token, userId) {
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      sessions.set(token, {
+        userId,
+        createdAt: now.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+      });
     },
   };
 }
@@ -104,6 +113,13 @@ describe('HTTP Transport Server', () => {
     test('returns an Express application', () => {
       expect(app).toBeDefined();
       expect(typeof app.listen).toBe('function');
+    });
+
+    test('accepts options object with sessionStore', () => {
+      const mockStore = createMockSessionStore();
+      const authedApp = createHttpApp({ sessionStore: mockStore });
+      expect(authedApp).toBeDefined();
+      expect(typeof authedApp.listen).toBe('function');
     });
   });
 
@@ -159,43 +175,19 @@ describe('HTTP Transport Server', () => {
         }
       });
     });
-  });
 
-  // ── Authentication ───────────────────────────────────────────────
+    test('passes sessionStore through to createHttpApp', (done) => {
+      const originalPort = process.env.PORT;
+      process.env.PORT = '0';
 
-  describe('Entra middleware enforcement', () => {
-    test('requests without bearer token get 401', async () => {
-      // Make the mock middleware reject
-      mockEntraMiddleware.mockImplementationOnce((req, res) => {
-        res.status(401).json({ error: 'Missing or invalid authorization header' });
+      const mockStore = createMockSessionStore();
+      server = startHttpServer({ sessionStore: mockStore });
+      expect(server).toBeInstanceOf(http.Server);
+
+      server.on('listening', () => {
+        process.env.PORT = originalPort;
+        done();
       });
-
-      const res = await request(app)
-        .post('/mcp')
-        .send(initializeBody());
-
-      expect(res.status).toBe(401);
-      expect(res.body.error).toBe('Missing or invalid authorization header');
-    });
-
-    test('middleware is invoked for POST /mcp', async () => {
-      await request(app)
-        .post('/mcp')
-        .send(initializeBody());
-
-      expect(mockEntraMiddleware).toHaveBeenCalled();
-    });
-
-    test('middleware is invoked for GET /mcp', async () => {
-      await request(app).get('/mcp');
-
-      expect(mockEntraMiddleware).toHaveBeenCalled();
-    });
-
-    test('middleware is invoked for DELETE /mcp', async () => {
-      await request(app).delete('/mcp');
-
-      expect(mockEntraMiddleware).toHaveBeenCalled();
     });
   });
 
@@ -284,7 +276,7 @@ describe('HTTP Transport Server', () => {
   // ── Request context (AsyncLocalStorage) ──────────────────────────
 
   describe('User context in AsyncLocalStorage', () => {
-    test('sets userId and entraToken from req.user during request handling', async () => {
+    test('wraps request handling in AsyncLocalStorage context', async () => {
       let capturedContext = null;
 
       // Override handleRequest to capture the async context
@@ -298,49 +290,153 @@ describe('HTTP Transport Server', () => {
         .post('/mcp')
         .send(initializeBody());
 
+      // Context should exist (user fields are undefined without auth middleware)
       expect(capturedContext).not.toBeNull();
-      expect(capturedContext.userId).toBe('test-oid-001');
-      expect(capturedContext.entraToken).toBe('fake-jwt-token');
+      expect(capturedContext).toHaveProperty('userId');
+      expect(capturedContext).toHaveProperty('sessionToken');
     });
 
-    test('context is isolated between concurrent requests', async () => {
-      const contexts = [];
+    test('populates userId and sessionToken from middleware when session is active', async () => {
+      const mockStore = createMockSessionStore();
+      const validToken = 'test-valid-token-123';
+      mockStore._addSession(validToken, 'user-abc');
+      const authedApp = createHttpApp({ sessionStore: mockStore });
 
-      // Set up two different users
-      mockEntraMiddleware
-        .mockImplementationOnce((req, _res, next) => {
-          req.user = { id: 'user-A', token: 'token-A' };
-          next();
-        })
-        .mockImplementationOnce((req, _res, next) => {
-          req.user = { id: 'user-B', token: 'token-B' };
-          next();
-        });
+      let capturedContext = null;
 
-      // Capture context inside each handleRequest call
-      mockHandleRequest
-        .mockImplementationOnce((_req, res) => {
-          contexts.push(getUserContext());
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ jsonrpc: '2.0', result: {} }));
-        })
-        .mockImplementationOnce((_req, res) => {
-          contexts.push(getUserContext());
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ jsonrpc: '2.0', result: {} }));
-        });
+      mockHandleRequest.mockImplementationOnce((_req, res) => {
+        capturedContext = getUserContext();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', result: {} }));
+      });
 
-      // Fire both requests
-      await Promise.all([
-        request(app).post('/mcp').send(initializeBody()),
-        request(app).post('/mcp').send(initializeBody()),
-      ]);
+      await request(authedApp)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${validToken}`)
+        .send(initializeBody());
 
-      expect(contexts).toHaveLength(2);
-      expect(contexts[0].userId).toBe('user-A');
-      expect(contexts[0].entraToken).toBe('token-A');
-      expect(contexts[1].userId).toBe('user-B');
-      expect(contexts[1].entraToken).toBe('token-B');
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext.userId).toBe('user-abc');
+      expect(capturedContext.sessionToken).toBe(validToken);
+    });
+  });
+
+  // ── Session middleware ─────────────────────────────────────────────
+
+  describe('Session token middleware', () => {
+    let mockStore;
+    let authedApp;
+    const validToken = 'valid-session-token-uuid';
+    const testUserId = 'user-oid-12345';
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockStore = createMockSessionStore();
+      mockStore._addSession(validToken, testUserId);
+      authedApp = createHttpApp({ sessionStore: mockStore });
+    });
+
+    test('rejects request without Authorization header with 401', async () => {
+      const res = await request(authedApp)
+        .post('/mcp')
+        .set('Content-Type', 'application/json')
+        .send(initializeBody());
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({
+        error: 'auth_required',
+        message: 'Session expired or missing. Authenticate at: /auth/login',
+        authUrl: '/auth/login',
+      });
+
+      // Should NOT have reached the MCP handler
+      expect(mockHandleRequest).not.toHaveBeenCalled();
+    });
+
+    test('rejects request with non-Bearer Authorization header with 401', async () => {
+      const res = await request(authedApp)
+        .post('/mcp')
+        .set('Authorization', 'Basic dXNlcjpwYXNz')
+        .send(initializeBody());
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('auth_required');
+      expect(mockHandleRequest).not.toHaveBeenCalled();
+    });
+
+    test('rejects request with invalid/unknown token with 401', async () => {
+      const res = await request(authedApp)
+        .post('/mcp')
+        .set('Authorization', 'Bearer totally-bogus-token')
+        .send(initializeBody());
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual({
+        error: 'auth_required',
+        message: 'Session expired or invalid. Re-authenticate at: /auth/login',
+        authUrl: '/auth/login',
+      });
+      expect(mockStore.validateSession).toHaveBeenCalledWith('totally-bogus-token');
+      expect(mockHandleRequest).not.toHaveBeenCalled();
+    });
+
+    test('allows request with valid token and sets req.user', async () => {
+      let capturedReqUser = null;
+
+      mockHandleRequest.mockImplementationOnce((req, res) => {
+        capturedReqUser = req.user;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', result: {} }));
+      });
+
+      const res = await request(authedApp)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${validToken}`)
+        .send(initializeBody());
+
+      expect(res.status).toBe(200);
+      expect(mockStore.validateSession).toHaveBeenCalledWith(validToken);
+      expect(mockHandleRequest).toHaveBeenCalled();
+      expect(capturedReqUser).toEqual({
+        id: testUserId,
+        sessionToken: validToken,
+      });
+    });
+
+    test('401 response body has correct JSON shape with error, message, and authUrl', async () => {
+      const res = await request(authedApp)
+        .post('/mcp')
+        .send(initializeBody());
+
+      expect(res.status).toBe(401);
+      expect(res.body).toHaveProperty('error');
+      expect(res.body).toHaveProperty('message');
+      expect(res.body).toHaveProperty('authUrl');
+      expect(typeof res.body.error).toBe('string');
+      expect(typeof res.body.message).toBe('string');
+      expect(typeof res.body.authUrl).toBe('string');
+    });
+
+    test('middleware is not applied when sessionStore is not provided', async () => {
+      // The default `app` (no sessionStore) should allow unauthenticated access
+      const res = await request(app)
+        .post('/mcp')
+        .send(initializeBody());
+
+      // Should reach the MCP handler (200 from mock) — no 401
+      expect(res.status).toBe(200);
+      expect(mockHandleRequest).toHaveBeenCalled();
+    });
+  });
+
+  // ── createSessionMiddleware export ─────────────────────────────────
+
+  describe('createSessionMiddleware()', () => {
+    test('is exported and returns a function', () => {
+      expect(typeof createSessionMiddleware).toBe('function');
+      const mockStore = createMockSessionStore();
+      const middleware = createSessionMiddleware(mockStore);
+      expect(typeof middleware).toBe('function');
     });
   });
 

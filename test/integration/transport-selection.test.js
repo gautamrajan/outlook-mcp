@@ -52,6 +52,13 @@ function setupMocks() {
     SERVER_NAME: 'test-outlook-assistant',
     SERVER_VERSION: '1.0.0-test',
     USE_TEST_MODE: false,
+    HOSTED: {
+      enabled: true,
+      tokenEncryptionKey: '',
+      tokenStorePath: '/tmp/test-hosted-tokens.json',
+      sessionStorePath: '/tmp/test-sessions.json',
+      hostedRedirectUri: '',
+    },
     AUTH_CONFIG: {
       tokenStorePath: '/tmp/test-tokens.json',
       clientId: 'test-client-id',
@@ -63,9 +70,22 @@ function setupMocks() {
     },
   }));
 
+  // Mock PerUserTokenStorage and SessionStore (used by HTTP branch in index.js)
+  jest.mock('../../auth/per-user-token-storage', () => {
+    return jest.fn().mockImplementation(() => ({
+      loadFromFile: jest.fn().mockResolvedValue(undefined),
+    }));
+  });
+  jest.mock('../../auth/session-store', () => {
+    return jest.fn().mockImplementation(() => ({
+      loadFromFile: jest.fn().mockResolvedValue(undefined),
+    }));
+  });
+
   // Mock auth, calendar, email, folder, rules modules to avoid side effects
   jest.mock('../../auth', () => ({
     authTools: [{ name: 'mock-auth-tool' }],
+    setHostedTokenStorage: jest.fn(),
   }));
   jest.mock('../../calendar', () => ({
     calendarTools: [{ name: 'mock-calendar-tool' }],
@@ -126,11 +146,14 @@ describe('Transport selection (index.js)', () => {
     expect(mockStartHttpServer).not.toHaveBeenCalled();
   });
 
-  test('should start HTTP server when MCP_TRANSPORT=http', () => {
+  test('should start HTTP server when MCP_TRANSPORT=http', async () => {
     process.env.MCP_TRANSPORT = 'http';
     setupMocks();
 
     require('../../index');
+
+    // Startup is async (Promise.all for store loading), so flush microtasks
+    await new Promise(setImmediate);
 
     expect(mockStartHttpServer).toHaveBeenCalledTimes(1);
 
@@ -138,21 +161,25 @@ describe('Transport selection (index.js)', () => {
     expect(MockStdioServerTransport).not.toHaveBeenCalled();
   });
 
-  test('should be case-insensitive: MCP_TRANSPORT=HTTP works', () => {
+  test('should be case-insensitive: MCP_TRANSPORT=HTTP works', async () => {
     process.env.MCP_TRANSPORT = 'HTTP';
     setupMocks();
 
     require('../../index');
 
+    await new Promise(setImmediate);
+
     expect(mockStartHttpServer).toHaveBeenCalledTimes(1);
     expect(MockStdioServerTransport).not.toHaveBeenCalled();
   });
 
-  test('should be case-insensitive: MCP_TRANSPORT=Http works', () => {
+  test('should be case-insensitive: MCP_TRANSPORT=Http works', async () => {
     process.env.MCP_TRANSPORT = 'Http';
     setupMocks();
 
     require('../../index');
+
+    await new Promise(setImmediate);
 
     expect(mockStartHttpServer).toHaveBeenCalledTimes(1);
     expect(MockStdioServerTransport).not.toHaveBeenCalled();
