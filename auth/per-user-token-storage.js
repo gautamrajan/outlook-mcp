@@ -12,7 +12,6 @@
  *   - expiresAt (ms timestamp) calculated from expiresIn at storage time
  */
 
-const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
@@ -36,6 +35,9 @@ class PerUserTokenStorage {
     this._key = encryptionKey
       ? crypto.createHash('sha256').update(encryptionKey).digest()
       : null;
+
+    // Serialize writes to avoid temp-file races during concurrent persistence.
+    this._saveChain = Promise.resolve();
   }
 
   // ── Validation ──────────────────────────────────────────────────────
@@ -265,34 +267,50 @@ class PerUserTokenStorage {
    */
   async saveToFile() {
     if (!this._filePath) return;
+    return this._enqueueSave(async () => {
+      // Ensure directory exists
+      const dir = path.dirname(this._filePath);
+      await fsp.mkdir(dir, { recursive: true });
 
-    // Ensure directory exists
-    const dir = path.dirname(this._filePath);
-    await fsp.mkdir(dir, { recursive: true });
+      // Serialize Map to plain object
+      const plain = {};
+      for (const [userId, tokenData] of this._tokens) {
+        plain[userId] = tokenData;
+      }
 
-    // Serialize Map to plain object
-    const plain = {};
-    for (const [userId, tokenData] of this._tokens) {
-      plain[userId] = tokenData;
-    }
+      let content;
+      if (this._key) {
+        content = JSON.stringify(this._encrypt(plain));
+      } else {
+        content = JSON.stringify(plain, null, 2);
+      }
 
-    let content;
-    if (this._key) {
-      content = JSON.stringify(this._encrypt(plain));
-    } else {
-      content = JSON.stringify(plain, null, 2);
-    }
+      const tmpPath = this._buildTmpPath();
+      try {
+        // Atomic write: write tmp -> fsync -> rename
+        const fd = await fsp.open(tmpPath, 'w', 0o600);
+        try {
+          await fd.writeFile(content, 'utf8');
+          await fd.sync();
+        } finally {
+          await fd.close();
+        }
+        await fsp.rename(tmpPath, this._filePath);
+      } catch (err) {
+        await fsp.unlink(tmpPath).catch(() => {});
+        throw err;
+      }
+    });
+  }
 
-    // Atomic write: write tmp -> fsync -> rename
-    const tmpPath = this._filePath + '.tmp';
-    const fd = await fsp.open(tmpPath, 'w');
-    try {
-      await fd.writeFile(content, 'utf8');
-      await fd.sync();
-    } finally {
-      await fd.close();
-    }
-    await fsp.rename(tmpPath, this._filePath);
+  _enqueueSave(saveFn) {
+    const next = this._saveChain.then(saveFn, saveFn);
+    this._saveChain = next.catch(() => {});
+    return next;
+  }
+
+  _buildTmpPath() {
+    return `${this._filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
   }
 
   // ── Encryption helpers ──────────────────────────────────────────────

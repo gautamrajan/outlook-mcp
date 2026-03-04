@@ -431,6 +431,28 @@ describe('PerUserTokenStorage — file persistence (plain)', () => {
     expect(realExists).toBe(true);
   });
 
+  test('concurrent setTokensForUser calls do not fail or lose persisted users', async () => {
+    tmpCtx = await makeTempStore();
+    const storage = new PerUserTokenStorage({ filePath: tmpCtx.filePath });
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        storage.setTokensForUser(`user-${i}`, {
+          accessToken: `token-${i}`,
+          refreshToken: `refresh-${i}`,
+          expiresIn: 3600,
+          scopes: 'Mail.Read',
+        })
+      )
+    );
+
+    const reloaded = new PerUserTokenStorage({ filePath: tmpCtx.filePath });
+    await reloaded.loadFromFile();
+    expect(reloaded.getActiveUserCount()).toBe(20);
+    expect(reloaded.getTokenForUser('user-0')).toBe('token-0');
+    expect(reloaded.getTokenForUser('user-19')).toBe('token-19');
+  });
+
   test('saveToFile is a no-op when no filePath is set', async () => {
     const storage = new PerUserTokenStorage();
     // Should not throw

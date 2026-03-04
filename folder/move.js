@@ -109,7 +109,7 @@ async function moveEmailsToFolder(accessToken, emailIds, targetFolderName, sourc
         await callGraphAPI(
           accessToken,
           'POST',
-          `me/messages/${emailId}/move`,
+          `me/messages/${encodeURIComponent(emailId)}/move`,
           {
             destinationId: targetFolderId
           }

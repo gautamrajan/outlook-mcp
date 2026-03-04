@@ -26,7 +26,7 @@ async function handleCancelEvent(args) {
     const accessToken = await ensureAuthenticated();
 
     // Build API endpoint
-    const endpoint = `me/events/${eventId}/cancel`;
+    const endpoint = `me/events/${encodeURIComponent(eventId)}/cancel`;
 
     // Request body
     const body = {

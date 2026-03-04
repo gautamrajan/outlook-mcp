@@ -147,6 +147,19 @@ if (transportMode === 'http') {
   const { setHostedTokenStorage } = require('./auth');
 
   const hostedConfig = config.HOSTED;
+  const allowInsecureTokenStore = process.env.ALLOW_INSECURE_TOKEN_STORE === 'true';
+
+  if (!hostedConfig.tokenEncryptionKey && !allowInsecureTokenStore) {
+    console.error(
+      'Hosted mode requires TOKEN_ENCRYPTION_KEY. Set ALLOW_INSECURE_TOKEN_STORE=true only for local development.'
+    );
+    process.exit(1);
+  }
+  if (!hostedConfig.tokenEncryptionKey && allowInsecureTokenStore) {
+    console.error(
+      'WARNING: Hosted token/session stores are running unencrypted because ALLOW_INSECURE_TOKEN_STORE=true.'
+    );
+  }
 
   // Instantiate stores with config-driven paths and encryption
   const tokenStorage = new PerUserTokenStorage({

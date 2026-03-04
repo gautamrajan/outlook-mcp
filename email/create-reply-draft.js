@@ -48,8 +48,8 @@ async function handleCreateReplyDraft(args) {
         };
 
     const endpoint = replyAll
-      ? `me/messages/${id}/createReplyAll`
-      : `me/messages/${id}/createReply`;
+      ? `me/messages/${encodeURIComponent(id)}/createReplyAll`
+      : `me/messages/${encodeURIComponent(id)}/createReply`;
 
     const result = await callGraphAPI(accessToken, 'POST', endpoint, requestBody);
 

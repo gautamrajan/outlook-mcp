@@ -3,6 +3,8 @@
  */
 const handleListRules = require('./list');
 const handleCreateRule = require('./create');
+const { callGraphAPI } = require('../utils/graph-api');
+const { ensureAuthenticated } = require('../auth');
 
 // Import getInboxRules for the edit sequence tool
 const { getInboxRules } = require('./list');
@@ -52,10 +54,10 @@ async function handleEditRuleSequence(args) {
     }
     
     // Update the rule sequence
-    const updateResult = await callGraphAPI(
+    await callGraphAPI(
       accessToken,
       'PATCH',
-      `me/mailFolders/inbox/messageRules/${rule.id}`,
+      `me/mailFolders/inbox/messageRules/${encodeURIComponent(rule.id)}`,
       {
         sequence: sequence
       }

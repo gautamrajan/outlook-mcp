@@ -26,7 +26,7 @@ async function handleDeclineEvent(args) {
     const accessToken = await ensureAuthenticated();
 
     // Build API endpoint
-    const endpoint = `me/events/${eventId}/decline`;
+    const endpoint = `me/events/${encodeURIComponent(eventId)}/decline`;
 
     // Request body
     const body = {

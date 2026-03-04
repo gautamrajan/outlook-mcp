@@ -26,7 +26,7 @@ async function handleDeleteEvent(args) {
     const accessToken = await ensureAuthenticated();
 
     // Build API endpoint
-    const endpoint = `me/events/${eventId}`;
+    const endpoint = `me/events/${encodeURIComponent(eventId)}`;
 
     // Make API call
     await callGraphAPI(accessToken, 'DELETE', endpoint);

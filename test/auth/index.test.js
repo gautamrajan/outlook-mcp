@@ -358,14 +358,14 @@ describe('auth/index.js', () => {
 
     // ── 5. No user context ─────────────────────────────────────────────
 
-    test('should throw when user context has no userId', async () => {
+    test('should fall back to local mode when context has no userId', async () => {
       const badCtx = { userId: null, entraToken: 'jwt' };
 
       await expect(
         requestContext.run(badCtx, async () => {
           return ensureAuthenticated();
         })
-      ).rejects.toThrow('No user context');
+      ).rejects.toThrow('Authentication required');
     });
 
     // ── 6. forceRefresh=true ───────────────────────────────────────────

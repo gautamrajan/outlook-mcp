@@ -20,7 +20,7 @@ const express = require('express');
 
 const PerUserTokenStorage = require('../../auth/per-user-token-storage');
 const SessionStore = require('../../auth/session-store');
-const { createAuthRoutes, _pendingAuth } = require('../../auth/auth-routes');
+const { createAuthRoutes, _pendingAuth, _consumedAuthStates } = require('../../auth/auth-routes');
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -106,6 +106,7 @@ function createInMemorySessionStore() {
 describe('Hosted Auth Flow — Integration', () => {
   afterEach(() => {
     _pendingAuth.clear();
+    _consumedAuthStates.clear();
     global.fetch = originalFetch;
   });
 
@@ -615,6 +616,7 @@ describe('Hosted Auth Flow — Integration', () => {
       const { createHttpApp } = require('../../transport/http-server');
       const { createAuthRoutes: freshCreateAuthRoutes, _pendingAuth: freshPending } =
         require('../../auth/auth-routes');
+      const { _consumedAuthStates: freshConsumed } = require('../../auth/auth-routes');
 
       const tokenStorage = new PerUserTokenStorage();
       const sessionStore = createInMemorySessionStore();
@@ -664,6 +666,7 @@ describe('Hosted Auth Flow — Integration', () => {
 
       // Cleanup
       freshPending.clear();
+      freshConsumed.clear();
     });
   });
 });

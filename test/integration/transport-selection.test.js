@@ -54,7 +54,7 @@ function setupMocks() {
     USE_TEST_MODE: false,
     HOSTED: {
       enabled: true,
-      tokenEncryptionKey: '',
+      tokenEncryptionKey: 'test-encryption-key',
       tokenStorePath: '/tmp/test-hosted-tokens.json',
       sessionStorePath: '/tmp/test-sessions.json',
       hostedRedirectUri: '',

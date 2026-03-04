@@ -392,5 +392,18 @@ describe('SessionStore', () => {
       }
       expect(tmpExists).toBe(false);
     });
+
+    test('concurrent createSession calls do not fail or corrupt writes', async () => {
+      const tokens = await Promise.all(
+        Array.from({ length: 25 }, (_, i) => store.createSession(`user-${i}`))
+      );
+
+      expect(new Set(tokens).size).toBe(25);
+      expect(store.getActiveSessions()).toHaveLength(25);
+
+      const reloaded = new SessionStore({ filePath });
+      await reloaded.loadFromFile();
+      expect(reloaded.getActiveSessions()).toHaveLength(25);
+    });
   });
 });

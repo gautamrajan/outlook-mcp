@@ -34,7 +34,8 @@ function getUserContext() {
  * @returns {boolean}
  */
 function isHostedMode() {
-  return getUserContext() !== null;
+  const ctx = getUserContext();
+  return !!(ctx && typeof ctx.userId === 'string' && ctx.userId.length > 0);
 }
 
 module.exports = { requestContext, getUserContext, isHostedMode };

@@ -24,7 +24,7 @@ async function handleTentativelyAcceptEvent(args) {
   try {
     const accessToken = await ensureAuthenticated();
 
-    const endpoint = `me/events/${eventId}/tentativelyAccept`;
+    const endpoint = `me/events/${encodeURIComponent(eventId)}/tentativelyAccept`;
 
     const body = {
       comment: comment || "Tentatively accepted via API"

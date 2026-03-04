@@ -28,6 +28,7 @@ function generatePKCE() {
 // ── Pending auth state (in-memory, per-process) ─────────────────────────
 
 const PENDING_AUTH_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const STATE_TOKEN_VERSION = 1;
 
 /**
  * In-memory store for pending authorization requests.
@@ -37,6 +38,7 @@ const PENDING_AUTH_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * @type {Map<string, { codeVerifier: string, expiresAt: number }>}
  */
 const pendingAuth = new Map();
+const consumedAuthStates = new Map();
 
 /**
  * Lazily removes expired entries from the pending auth map.
@@ -49,6 +51,105 @@ function cleanupExpiredPendingAuth() {
       pendingAuth.delete(state);
     }
   }
+}
+
+function cleanupConsumedAuthStates() {
+  const now = Date.now();
+  for (const [stateHash, expiresAt] of consumedAuthStates) {
+    if (expiresAt <= now) {
+      consumedAuthStates.delete(stateHash);
+    }
+  }
+}
+
+function getStateSigningSecret(authConfig) {
+  return (
+    process.env.AUTH_STATE_SECRET ||
+    process.env.TOKEN_ENCRYPTION_KEY ||
+    authConfig.clientSecret ||
+    null
+  );
+}
+
+function createSignedState({ codeVerifier, expiresAt, secret }) {
+  const payload = JSON.stringify({
+    v: STATE_TOKEN_VERSION,
+    cv: codeVerifier,
+    exp: expiresAt,
+    n: crypto.randomBytes(12).toString('base64url'),
+  });
+  const payloadB64 = Buffer.from(payload, 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function parseSignedState(state, secret) {
+  if (!state || typeof state !== 'string') {
+    return null;
+  }
+
+  const parts = state.split('.');
+  if (parts.length !== 2) {
+    return null;
+  }
+
+  const [payloadB64, sig] = parts;
+  if (!payloadB64 || !sig) {
+    return null;
+  }
+
+  const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  const actualSigBuf = Buffer.from(sig);
+  const expectedSigBuf = Buffer.from(expectedSig);
+  if (actualSigBuf.length !== expectedSigBuf.length) {
+    return null;
+  }
+  if (!crypto.timingSafeEqual(actualSigBuf, expectedSigBuf)) {
+    return null;
+  }
+
+  try {
+    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    const payload = JSON.parse(payloadJson);
+
+    if (payload?.v !== STATE_TOKEN_VERSION) {
+      return null;
+    }
+    if (typeof payload.cv !== 'string' || !payload.cv) {
+      return null;
+    }
+    if (!Number.isFinite(payload.exp)) {
+      return null;
+    }
+    if (payload.exp <= Date.now()) {
+      return null;
+    }
+
+    return {
+      codeVerifier: payload.cv,
+      expiresAt: payload.exp,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function markStateConsumed(state, expiresAt) {
+  const stateHash = crypto.createHash('sha256').update(state).digest('hex');
+  consumedAuthStates.set(stateHash, expiresAt);
+}
+
+function isStateConsumed(state) {
+  const stateHash = crypto.createHash('sha256').update(state).digest('hex');
+  const expiresAt = consumedAuthStates.get(stateHash);
+  if (!expiresAt) {
+    return false;
+  }
+  if (expiresAt <= Date.now()) {
+    consumedAuthStates.delete(stateHash);
+    return false;
+  }
+  return true;
 }
 
 // ── Route factory ───────────────────────────────────────────────────────
@@ -73,23 +174,31 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
   const clientSecret = authConfig.clientSecret;
   const scopes = authConfig.scopes;
   const redirectUri = authConfig.hostedRedirectUri || authConfig.redirectUri;
+  const stateSigningSecret = getStateSigningSecret(authConfig);
 
   // ── GET /login ─────────────────────────────────────────────────────
 
   router.get('/login', (req, res) => {
     // Lazy cleanup of expired pending auth entries
     cleanupExpiredPendingAuth();
+    cleanupConsumedAuthStates();
 
     // Generate PKCE pair
     const { verifier, challenge } = generatePKCE();
-
-    // Generate random state for CSRF protection
-    const state = crypto.randomBytes(16).toString('hex');
+    const expiresAt = Date.now() + PENDING_AUTH_TTL_MS;
+    if (!stateSigningSecret) {
+      return res.status(500).send('Auth state signing secret is not configured');
+    }
+    const state = createSignedState({
+      codeVerifier: verifier,
+      expiresAt,
+      secret: stateSigningSecret,
+    });
 
     // Store pending auth entry with TTL
     pendingAuth.set(state, {
       codeVerifier: verifier,
-      expiresAt: Date.now() + PENDING_AUTH_TTL_MS,
+      expiresAt,
     });
 
     // Build the Entra authorize URL
@@ -120,22 +229,39 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
     if (!state) {
       return res.status(400).send('Missing state parameter');
     }
+    if (typeof code !== 'string' || typeof state !== 'string') {
+      return res.status(400).send('Invalid callback parameters');
+    }
+    if (!stateSigningSecret) {
+      return res.status(500).send('Auth state signing secret is not configured');
+    }
+    cleanupConsumedAuthStates();
+    if (isStateConsumed(state)) {
+      return res.status(400).send('Invalid or expired state parameter');
+    }
 
-    // Validate state against pending auth map (CSRF check)
+    // Validate state against pending auth map first (same-process fast path).
     const pending = pendingAuth.get(state);
-    if (!pending) {
-      return res.status(400).send('Invalid or expired state parameter');
-    }
-
-    // Check if the pending entry has expired
-    if (pending.expiresAt <= Date.now()) {
+    let codeVerifier;
+    let stateExpiresAt;
+    if (pending) {
+      if (pending.expiresAt <= Date.now()) {
+        pendingAuth.delete(state);
+        return res.status(400).send('Invalid or expired state parameter');
+      }
+      ({ codeVerifier } = pending);
+      stateExpiresAt = pending.expiresAt;
       pendingAuth.delete(state);
-      return res.status(400).send('Invalid or expired state parameter');
+    } else {
+      // Restart / multi-instance fallback: verify signed state payload.
+      const parsed = parseSignedState(state, stateSigningSecret);
+      if (!parsed) {
+        return res.status(400).send('Invalid or expired state parameter');
+      }
+      codeVerifier = parsed.codeVerifier;
+      stateExpiresAt = parsed.expiresAt;
     }
-
-    // Single-use: delete the entry
-    const { codeVerifier } = pending;
-    pendingAuth.delete(state);
+    markStateConsumed(state, stateExpiresAt);
 
     try {
       // Exchange auth code for tokens
@@ -192,8 +318,8 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
       // Create session
       const sessionToken = await sessionStore.createSession(userId);
 
-      // Determine server base URL for the config snippet
-      const serverBase = `${req.protocol}://${req.get('host')}`;
+      // Determine trusted server base URL for the config snippet
+      const serverBase = getTrustedServerBaseUrl(authConfig, config.PORT);
 
       // Return success HTML
       res.status(200).send(renderSuccessPage({
@@ -393,4 +519,28 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-module.exports = { createAuthRoutes, generatePKCE, _pendingAuth: pendingAuth };
+module.exports = {
+  createAuthRoutes,
+  generatePKCE,
+  _pendingAuth: pendingAuth,
+  _consumedAuthStates: consumedAuthStates,
+};
+
+function getTrustedServerBaseUrl(authConfig, fallbackPort = 3000) {
+  const candidates = [
+    process.env.PUBLIC_BASE_URL,
+    authConfig.hostedRedirectUri,
+    authConfig.redirectUri,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return new URL(candidate).origin;
+    } catch {
+      // Ignore malformed values and continue.
+    }
+  }
+
+  return `http://localhost:${fallbackPort || 3000}`;
+}

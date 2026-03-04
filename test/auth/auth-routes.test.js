@@ -1,7 +1,12 @@
 const crypto = require('crypto');
 const express = require('express');
 const supertest = require('supertest');
-const { createAuthRoutes, generatePKCE, _pendingAuth } = require('../../auth/auth-routes');
+const {
+  createAuthRoutes,
+  generatePKCE,
+  _pendingAuth,
+  _consumedAuthStates,
+} = require('../../auth/auth-routes');
 
 // ── Mock factories ──────────────────────────────────────────────────────
 
@@ -98,6 +103,7 @@ function createTestApp(overrides = {}) {
 afterEach(() => {
   // Clear the shared pendingAuth map between tests
   _pendingAuth.clear();
+  _consumedAuthStates.clear();
 });
 
 // ── PKCE generation ─────────────────────────────────────────────────────
@@ -309,6 +315,24 @@ describe('GET /auth/callback — success', () => {
     expect(callbackRes.text).toContain('Test User');
   });
 
+  test('uses trusted configured base URL, not Host header, in rendered config', async () => {
+    const testApp = createTestApp();
+    const { app } = testApp;
+
+    const loginRes = await supertest(app).get('/auth/login').expect(302);
+    const url = new URL(loginRes.headers.location);
+    const state = url.searchParams.get('state');
+
+    const callbackRes = await supertest(app)
+      .get('/auth/callback')
+      .set('Host', 'attacker.example.com')
+      .query({ code: 'mock-auth-code', state })
+      .expect(200);
+
+    expect(callbackRes.text).toContain('https://outlook-mcp.example.com/mcp');
+    expect(callbackRes.text).not.toContain('attacker.example.com');
+  });
+
   test('state is single-use — second callback with same state returns 400', async () => {
     const testApp = createTestApp();
     const { app } = testApp;
@@ -329,6 +353,32 @@ describe('GET /auth/callback — success', () => {
       .get('/auth/callback')
       .query({ code: 'mock-auth-code', state })
       .expect(400);
+  });
+
+  test('callback succeeds when pending map entry is missing but signed state is valid', async () => {
+    const mockFetch = createMockFetch();
+    const testApp = createTestApp({ fetch: mockFetch });
+    const { app, fetch } = testApp;
+
+    const loginRes = await supertest(app).get('/auth/login').expect(302);
+    const loginUrl = new URL(loginRes.headers.location);
+    const state = loginUrl.searchParams.get('state');
+    const challenge = loginUrl.searchParams.get('code_challenge');
+
+    // Simulate restart/another instance by clearing in-memory pending entries.
+    _pendingAuth.clear();
+
+    await supertest(app)
+      .get('/auth/callback')
+      .query({ code: 'mock-auth-code', state })
+      .expect(200);
+
+    const tokenCall = fetch.mock.calls.find(([url]) => url.includes('oauth2/v2.0/token'));
+    const tokenBody = new URLSearchParams(tokenCall[1].body);
+    const codeVerifier = tokenBody.get('code_verifier');
+    const expectedChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
+    expect(expectedChallenge).toBe(challenge);
   });
 });
 

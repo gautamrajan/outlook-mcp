@@ -38,6 +38,14 @@ describe('request-context', () => {
     });
   });
 
+  test('isHostedMode() should return false for context without userId', async () => {
+    const partialCtx = { entraToken: 'entra-token-xyz' };
+
+    await requestContext.run(partialCtx, async () => {
+      expect(isHostedMode()).toBe(false);
+    });
+  });
+
   // Test 6: Nested runs properly scope context
   test('nested runs should properly scope context', async () => {
     const outerCtx = { userId: 'outer-user', entraToken: 'outer-token' };

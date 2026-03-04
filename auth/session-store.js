@@ -13,7 +13,6 @@
  */
 
 const crypto = require('node:crypto');
-const fs = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -40,6 +39,9 @@ class SessionStore {
 
     /** @type {Map<string, {userId: string, createdAt: string, expiresAt: string}>} */
     this._sessions = new Map();
+
+    // Serialize writes to avoid temp-file races under concurrent save operations.
+    this._saveChain = Promise.resolve();
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -197,32 +199,49 @@ class SessionStore {
    * to avoid corruption on crash.
    */
   async saveToFile() {
-    const plain = Object.fromEntries(this._sessions);
-    let payload;
+    return this._enqueueSave(async () => {
+      const plain = Object.fromEntries(this._sessions);
+      let payload;
 
-    if (this._encryptionKey) {
-      payload = JSON.stringify(this._encrypt(JSON.stringify(plain)));
-    } else {
-      payload = JSON.stringify(plain, null, 2);
-    }
+      if (this._encryptionKey) {
+        payload = JSON.stringify(this._encrypt(JSON.stringify(plain)));
+      } else {
+        payload = JSON.stringify(plain, null, 2);
+      }
 
-    const tmpPath = this.filePath + '.tmp';
+      const tmpPath = this._buildTmpPath();
 
-    // Ensure the directory exists
-    const dir = path.dirname(this.filePath);
-    await fsPromises.mkdir(dir, { recursive: true });
+      // Ensure the directory exists
+      const dir = path.dirname(this.filePath);
+      await fsPromises.mkdir(dir, { recursive: true });
 
-    // Write to temp file
-    const fd = await fsPromises.open(tmpPath, 'w');
-    try {
-      await fd.writeFile(payload, 'utf8');
-      await fd.sync();
-    } finally {
-      await fd.close();
-    }
+      try {
+        // Write to temp file with user-only permissions
+        const fd = await fsPromises.open(tmpPath, 'w', 0o600);
+        try {
+          await fd.writeFile(payload, 'utf8');
+          await fd.sync();
+        } finally {
+          await fd.close();
+        }
 
-    // Atomic rename
-    await fsPromises.rename(tmpPath, this.filePath);
+        // Atomic rename
+        await fsPromises.rename(tmpPath, this.filePath);
+      } catch (err) {
+        await fsPromises.unlink(tmpPath).catch(() => {});
+        throw err;
+      }
+    });
+  }
+
+  _enqueueSave(saveFn) {
+    const next = this._saveChain.then(saveFn, saveFn);
+    this._saveChain = next.catch(() => {});
+    return next;
+  }
+
+  _buildTmpPath() {
+    return `${this.filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
   }
 
   // ── Encryption helpers ──────────────────────────────────────────────
