@@ -135,16 +135,25 @@ server.fallbackRequestHandler = async (request) => {
   }
 };
 
-// Make the script executable
-process.on('SIGTERM', () => {
-  console.error('SIGTERM received but staying alive');
-});
+// ── Transport selection ──────────────────────────────────────────────
+const transportMode = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase();
 
-// Start the server
-const transport = new StdioServerTransport();
-server.connect(transport)
-  .then(() => console.error(`${config.SERVER_NAME} connected and listening`))
-  .catch(error => {
-    console.error(`Connection error: ${error.message}`);
-    process.exit(1);
+if (transportMode === 'http') {
+  // HTTP transport — delegated to transport/http-server.js
+  // (Server + tools are created per-request there; the stdio Server above is unused)
+  const { startHttpServer } = require('./transport/http-server');
+  startHttpServer();
+} else {
+  // stdio transport — original behaviour (default)
+  process.on('SIGTERM', () => {
+    console.error('SIGTERM received but staying alive');
   });
+
+  const transport = new StdioServerTransport();
+  server.connect(transport)
+    .then(() => console.error(`${config.SERVER_NAME} connected and listening`))
+    .catch(error => {
+      console.error(`Connection error: ${error.message}`);
+      process.exit(1);
+    });
+}

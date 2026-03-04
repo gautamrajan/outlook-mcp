@@ -16,6 +16,19 @@ module.exports = {
   // Test mode setting
   USE_TEST_MODE: process.env.USE_TEST_MODE === 'true',
 
+  // Transport
+  MCP_TRANSPORT: process.env.MCP_TRANSPORT || 'stdio',  // 'stdio' or 'http'
+  PORT: parseInt(process.env.PORT, 10) || 3000,
+
+  // Hosted mode auth
+  HOSTED_AUTH: {
+    enabled: (process.env.MCP_TRANSPORT || 'stdio').toLowerCase() === 'http',
+    tenantId: process.env.OUTLOOK_TENANT_ID || process.env.MS_TENANT_ID || 'common',
+    clientId: process.env.OUTLOOK_CLIENT_ID || process.env.MS_CLIENT_ID || '',
+    // Note: clientId and clientSecret are shared with AUTH_CONFIG — that's fine,
+    // it's the same Entra app registration for both modes
+  },
+
   // Authentication configuration
   AUTH_CONFIG: {
     clientId: process.env.OUTLOOK_CLIENT_ID || process.env.MS_CLIENT_ID || '',

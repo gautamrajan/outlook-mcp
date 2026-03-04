@@ -1,0 +1,171 @@
+/**
+ * Tests for config.js
+ *
+ * Since config.js reads environment variables at require time,
+ * we use jest.resetModules() and set env vars before re-requiring.
+ */
+
+describe('config', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    // Shallow clone so we can mutate without affecting originals
+    process.env = { ...originalEnv };
+    // Clear the module cache so config.js re-reads env vars on next require
+    jest.resetModules();
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  // ── Existing config values still present ────────────────────────
+
+  test('should export SERVER_NAME', () => {
+    const config = require('../config');
+    expect(config.SERVER_NAME).toBe('outlook-assistant');
+  });
+
+  test('should export SERVER_VERSION', () => {
+    const config = require('../config');
+    expect(config.SERVER_VERSION).toBe('1.0.0');
+  });
+
+  test('should export AUTH_CONFIG with expected keys', () => {
+    const config = require('../config');
+    expect(config.AUTH_CONFIG).toBeDefined();
+    expect(config.AUTH_CONFIG).toHaveProperty('clientId');
+    expect(config.AUTH_CONFIG).toHaveProperty('clientSecret');
+    expect(config.AUTH_CONFIG).toHaveProperty('tenantId');
+    expect(config.AUTH_CONFIG).toHaveProperty('tokenEndpoint');
+    expect(config.AUTH_CONFIG).toHaveProperty('redirectUri');
+    expect(config.AUTH_CONFIG).toHaveProperty('scopes');
+    expect(config.AUTH_CONFIG).toHaveProperty('tokenStorePath');
+    expect(config.AUTH_CONFIG).toHaveProperty('authServerUrl');
+  });
+
+  test('should export GRAPH_API_ENDPOINT', () => {
+    const config = require('../config');
+    expect(config.GRAPH_API_ENDPOINT).toBe('https://graph.microsoft.com/v1.0/');
+  });
+
+  test('should export EMAIL_SELECT_FIELDS', () => {
+    const config = require('../config');
+    expect(config.EMAIL_SELECT_FIELDS).toBeDefined();
+    expect(typeof config.EMAIL_SELECT_FIELDS).toBe('string');
+  });
+
+  test('should export CALENDAR_SELECT_FIELDS', () => {
+    const config = require('../config');
+    expect(config.CALENDAR_SELECT_FIELDS).toBeDefined();
+    expect(typeof config.CALENDAR_SELECT_FIELDS).toBe('string');
+  });
+
+  test('should export DEFAULT_PAGE_SIZE and MAX_RESULT_COUNT', () => {
+    const config = require('../config');
+    expect(config.DEFAULT_PAGE_SIZE).toBe(25);
+    expect(config.MAX_RESULT_COUNT).toBe(50);
+  });
+
+  test('should export DEFAULT_TIMEZONE', () => {
+    const config = require('../config');
+    expect(config.DEFAULT_TIMEZONE).toBeDefined();
+    expect(typeof config.DEFAULT_TIMEZONE).toBe('string');
+  });
+
+  // ── MCP_TRANSPORT ───────────────────────────────────────────────
+
+  test('MCP_TRANSPORT should default to "stdio"', () => {
+    delete process.env.MCP_TRANSPORT;
+    const config = require('../config');
+    expect(config.MCP_TRANSPORT).toBe('stdio');
+  });
+
+  test('MCP_TRANSPORT should reflect env var when set', () => {
+    process.env.MCP_TRANSPORT = 'http';
+    const config = require('../config');
+    expect(config.MCP_TRANSPORT).toBe('http');
+  });
+
+  // ── PORT ────────────────────────────────────────────────────────
+
+  test('PORT should default to 3000', () => {
+    delete process.env.PORT;
+    const config = require('../config');
+    expect(config.PORT).toBe(3000);
+  });
+
+  test('PORT should parse env var as integer', () => {
+    process.env.PORT = '8080';
+    const config = require('../config');
+    expect(config.PORT).toBe(8080);
+  });
+
+  // ── HOSTED_AUTH ─────────────────────────────────────────────────
+
+  test('HOSTED_AUTH.enabled should be false when MCP_TRANSPORT is not "http"', () => {
+    delete process.env.MCP_TRANSPORT;
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.enabled).toBe(false);
+  });
+
+  test('HOSTED_AUTH.enabled should be false when MCP_TRANSPORT is "stdio"', () => {
+    process.env.MCP_TRANSPORT = 'stdio';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.enabled).toBe(false);
+  });
+
+  test('HOSTED_AUTH.enabled should be true when MCP_TRANSPORT is "http"', () => {
+    process.env.MCP_TRANSPORT = 'http';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.enabled).toBe(true);
+  });
+
+  test('HOSTED_AUTH.enabled should be true when MCP_TRANSPORT is "HTTP" (case-insensitive)', () => {
+    process.env.MCP_TRANSPORT = 'HTTP';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.enabled).toBe(true);
+  });
+
+  test('HOSTED_AUTH.tenantId should default to "common"', () => {
+    delete process.env.OUTLOOK_TENANT_ID;
+    delete process.env.MS_TENANT_ID;
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.tenantId).toBe('common');
+  });
+
+  test('HOSTED_AUTH.tenantId should prefer OUTLOOK_TENANT_ID over MS_TENANT_ID', () => {
+    process.env.OUTLOOK_TENANT_ID = 'outlook-tenant';
+    process.env.MS_TENANT_ID = 'ms-tenant';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.tenantId).toBe('outlook-tenant');
+  });
+
+  test('HOSTED_AUTH.tenantId should fall back to MS_TENANT_ID', () => {
+    delete process.env.OUTLOOK_TENANT_ID;
+    process.env.MS_TENANT_ID = 'ms-tenant';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.tenantId).toBe('ms-tenant');
+  });
+
+  test('HOSTED_AUTH.clientId should default to empty string', () => {
+    delete process.env.OUTLOOK_CLIENT_ID;
+    delete process.env.MS_CLIENT_ID;
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.clientId).toBe('');
+  });
+
+  test('HOSTED_AUTH.clientId should prefer OUTLOOK_CLIENT_ID over MS_CLIENT_ID', () => {
+    process.env.OUTLOOK_CLIENT_ID = 'outlook-client';
+    process.env.MS_CLIENT_ID = 'ms-client';
+    const config = require('../config');
+    expect(config.HOSTED_AUTH.clientId).toBe('outlook-client');
+  });
+
+  test('HOSTED_AUTH should have the expected shape', () => {
+    const config = require('../config');
+    expect(config.HOSTED_AUTH).toHaveProperty('enabled');
+    expect(config.HOSTED_AUTH).toHaveProperty('tenantId');
+    expect(config.HOSTED_AUTH).toHaveProperty('clientId');
+  });
+});
