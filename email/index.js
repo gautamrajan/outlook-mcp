@@ -7,6 +7,7 @@ const handleReadEmail = require('./read');
 const handleSendEmail = require('./send');
 const handleCreateDraft = require('./create-draft');
 const handleMarkAsRead = require('./mark-as-read');
+const handleArchiveEmail = require('./archive-email');
 const handleCreateReplyDraft = require('./create-reply-draft');
 
 // Email tool definitions
@@ -184,6 +185,21 @@ const emailTools = [
     handler: handleMarkAsRead
   },
   {
+    name: "archive-email",
+    description: "Moves an email to the Archive folder",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "ID of the email to archive"
+        }
+      },
+      required: ["id"]
+    },
+    handler: handleArchiveEmail
+  },
+  {
     name: "create-reply-draft",
     description: "Creates a reply draft to an existing email, preserving the conversation thread",
     inputSchema: {
@@ -220,5 +236,6 @@ module.exports = {
   handleSendEmail,
   handleCreateDraft,
   handleMarkAsRead,
+  handleArchiveEmail,
   handleCreateReplyDraft
 };

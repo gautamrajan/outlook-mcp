@@ -2,7 +2,7 @@
  * Session token store for multi-user hosted mode.
  *
  * Maps opaque session tokens (sent in the Authorization header) to user IDs.
- * Sessions are long-lived (default 30 days) and persisted to disk using the
+ * Sessions do not expire by default and are persisted to disk using the
  * same encrypted-JSON pattern as the rest of the auth layer.
  *
  * Storage format (encrypted):
@@ -51,13 +51,15 @@ class SessionStore {
    *
    * @param {string} userId
    * @param {object} [opts]
-   * @param {number} [opts.expiresInDays=30]
+   * @param {number} [opts.expiresInDays=0] 0 means no expiry.
    * @returns {Promise<string>} The generated session token.
    */
-  async createSession(userId, { expiresInDays = 30 } = {}) {
+  async createSession(userId, { expiresInDays = 0 } = {}) {
     const token = crypto.randomUUID();
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1000);
+    const expiresAt = expiresInDays > 0
+      ? new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1000)
+      : null;
 
     this._sessions.set(token, {
       userId,
@@ -73,7 +75,7 @@ class SessionStore {
    * Validates a session token.
    *
    * @param {string} token
-   * @returns {{ userId: string, createdAt: string, expiresAt: string } | null}
+   * @returns {{ userId: string, createdAt: string, expiresAt: string|null } | null}
    */
   validateSession(token) {
     if (token == null) return null;
@@ -81,8 +83,8 @@ class SessionStore {
     const session = this._sessions.get(token);
     if (!session) return null;
 
-    // Lazy expiry cleanup
-    if (new Date(session.expiresAt) <= new Date()) {
+    // Lazy expiry cleanup (skip if no expiry set)
+    if (session.expiresAt && new Date(session.expiresAt) <= new Date()) {
       this._sessions.delete(token);
       // Fire-and-forget save; callers don't need to wait for cleanup persistence
       this.saveToFile().catch(() => {});
@@ -131,7 +133,7 @@ class SessionStore {
     const now = new Date();
     const result = [];
     for (const [token, session] of this._sessions) {
-      if (new Date(session.expiresAt) > now) {
+      if (!session.expiresAt || new Date(session.expiresAt) > now) {
         result.push({
           token: token.slice(0, 8) + '...',
           userId: session.userId,
@@ -153,7 +155,7 @@ class SessionStore {
     const now = new Date();
     let count = 0;
     for (const session of this._sessions.values()) {
-      if (session.userId === userId && new Date(session.expiresAt) > now) {
+      if (session.userId === userId && (!session.expiresAt || new Date(session.expiresAt) > now)) {
         count++;
       }
     }

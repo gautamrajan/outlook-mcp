@@ -352,12 +352,29 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
  */
 function renderSuccessPage({ userName, userEmail, sessionToken, serverBase }) {
   const displayName = userName || userEmail || 'User';
-  const configSnippet = JSON.stringify({
+  const claudeCodeConfig = JSON.stringify({
     mcpServers: {
       outlook: {
         url: `${serverBase}/mcp`,
         headers: {
           Authorization: `Bearer ${sessionToken}`,
+        },
+      },
+    },
+  }, null, 2);
+
+  const claudeDesktopConfig = JSON.stringify({
+    mcpServers: {
+      outlook: {
+        command: "npx",
+        args: [
+          "mcp-remote",
+          `${serverBase}/mcp`,
+          "--header",
+          `Authorization:\${AUTH_HEADER}`,
+        ],
+        env: {
+          AUTH_HEADER: `Bearer ${sessionToken}`,
         },
       },
     },
@@ -472,16 +489,25 @@ function renderSuccessPage({ userName, userEmail, sessionToken, serverBase }) {
     </div>
 
     <div class="section">
+      <div class="section-label">Claude Desktop Configuration</div>
+      <div class="config-box" id="desktop-config-box">
+${escapeHtml(claudeDesktopConfig)}
+        <button class="copy-btn" onclick="copyConfig('desktop', this)">Copy</button>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-label">Claude Code Configuration</div>
-      <div class="config-box" id="config-box">
-${escapeHtml(configSnippet)}
-        <button class="copy-btn" onclick="copyConfig(this)">Copy</button>
+      <div class="config-box" id="code-config-box">
+${escapeHtml(claudeCodeConfig)}
+        <button class="copy-btn" onclick="copyConfig('code', this)">Copy</button>
       </div>
     </div>
 
     <p class="note">
-      Add the configuration above to your Claude Code MCP settings.
-      This session token is valid for 30 days. You can close this page.
+      Add one of the configurations above to your Claude settings.
+      Claude Desktop requires <code>mcp-remote</code> (installed automatically via npx).
+      You can close this page.
     </p>
   </div>
   <script>
@@ -495,8 +521,8 @@ ${escapeHtml(configSnippet)}
         }, 2000);
       });
     }
-    function copyConfig(btn) {
-      var config = ${JSON.stringify(configSnippet)};
+    function copyConfig(type, btn) {
+      var config = type === 'desktop' ? ${JSON.stringify(claudeDesktopConfig)} : ${JSON.stringify(claudeCodeConfig)};
       copyText(config, btn);
     }
   </script>
