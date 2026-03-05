@@ -64,7 +64,7 @@ class SessionStore {
     this._sessions.set(token, {
       userId,
       createdAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
     });
 
     await this.saveToFile();
