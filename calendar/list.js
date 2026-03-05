@@ -33,8 +33,13 @@ async function handleListEvents(args) {
       $select: config.CALENDAR_SELECT_FIELDS
     };
     
+    // Request times in the user's configured timezone
+    const preferHeaders = {
+      'Prefer': `outlook.timezone="${config.DEFAULT_TIMEZONE}"`
+    };
+
     // Make API call
-    const response = await callGraphAPI(accessToken, 'GET', endpoint, null, queryParams);
+    const response = await callGraphAPI(accessToken, 'GET', endpoint, null, queryParams, preferHeaders);
     
     if (!response.value || response.value.length === 0) {
       return {

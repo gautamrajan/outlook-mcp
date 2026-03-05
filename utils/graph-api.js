@@ -53,13 +53,14 @@ function _buildUrl(path, queryParams) {
   return finalUrl;
 }
 
-function _callGraphAPIOnce(accessToken, method, finalUrl, data) {
+function _callGraphAPIOnce(accessToken, method, finalUrl, data, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = https.request(finalUrl, {
       method,
       headers: {
         'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...extraHeaders
       }
     }, (res) => {
       let responseData = '';
@@ -94,7 +95,7 @@ function _callGraphAPIOnce(accessToken, method, finalUrl, data) {
  * Makes a request to the Microsoft Graph API.
  * Automatically retries once on 401 by refreshing the access token.
  */
-async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}) {
+async function callGraphAPI(accessToken, method, path, data = null, queryParams = {}, extraHeaders = {}) {
   if (config.USE_TEST_MODE && accessToken.startsWith('test_access_token_')) {
     console.error(`TEST MODE: Simulating ${method} ${path} API call`);
     return mockData.simulateGraphAPIResponse(method, path, data, queryParams);
@@ -104,14 +105,14 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
   const finalUrl = _buildUrl(path, queryParams);
 
   try {
-    return await _callGraphAPIOnce(accessToken, method, finalUrl, data);
+    return await _callGraphAPIOnce(accessToken, method, finalUrl, data, extraHeaders);
   } catch (error) {
     if (error.message !== 'UNAUTHORIZED') throw error;
 
     console.error('Got 401 — forcing token refresh and retrying.');
     try {
       const newToken = await getEnsureAuthenticated()({ forceRefresh: true });
-      return await _callGraphAPIOnce(newToken, method, finalUrl, data);
+      return await _callGraphAPIOnce(newToken, method, finalUrl, data, extraHeaders);
     } catch (retryError) {
       throw retryError;
     }
