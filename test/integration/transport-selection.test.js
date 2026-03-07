@@ -23,7 +23,54 @@ let MockServer;
 let MockStdioServerTransport;
 let mockStartHttpServer;
 
-function setupMocks() {
+function setupMocks(configOverrides = {}) {
+  const mockBaseConfig = {
+    SERVER_NAME: 'test-outlook-assistant',
+    SERVER_VERSION: '1.0.0-test',
+    USE_TEST_MODE: false,
+    HOSTED: {
+      enabled: true,
+      tokenEncryptionKey: 'test-encryption-key',
+      tokenStorePath: '/tmp/test-hosted-tokens.json',
+      sessionStorePath: '/tmp/test-sessions.json',
+      publicBaseUrl: 'https://outlook-mcp.example.com',
+      hostedRedirectUri: 'https://outlook-mcp.example.com/auth/callback',
+      sessionExpirationDays: 14,
+    },
+    AUTH_CONFIG: {
+      tokenStorePath: '/tmp/test-tokens.json',
+      clientId: 'test-client-id',
+      clientSecret: 'test-client-secret',
+      tenantId: 'test-tenant-id',
+      tokenEndpoint: 'https://login.microsoftonline.com/test-tenant-id/oauth2/v2.0/token',
+      redirectUri: 'http://localhost:3333/auth/callback',
+      hostedRedirectUri: 'https://outlook-mcp.example.com/auth/callback',
+      scopes: ['offline_access', 'Mail.Read'],
+    },
+    CONNECTOR_AUTH: {
+      apiAppId: 'api://test-app-id',
+      apiScope: 'mcp.access',
+      oboScopes: 'Mail.Read User.Read',
+    },
+  };
+
+  const mockMergedConfig = {
+    ...mockBaseConfig,
+    ...configOverrides,
+    HOSTED: {
+      ...mockBaseConfig.HOSTED,
+      ...(configOverrides.HOSTED || {}),
+    },
+    AUTH_CONFIG: {
+      ...mockBaseConfig.AUTH_CONFIG,
+      ...(configOverrides.AUTH_CONFIG || {}),
+    },
+    CONNECTOR_AUTH: {
+      ...mockBaseConfig.CONNECTOR_AUTH,
+      ...(configOverrides.CONNECTOR_AUTH || {}),
+    },
+  };
+
   // MCP Server mock
   mockServerConnect = jest.fn().mockResolvedValue(undefined);
   MockServer = jest.fn().mockImplementation(() => ({
@@ -48,27 +95,7 @@ function setupMocks() {
   }));
 
   // Mock config to avoid needing real env vars
-  jest.mock('../../config', () => ({
-    SERVER_NAME: 'test-outlook-assistant',
-    SERVER_VERSION: '1.0.0-test',
-    USE_TEST_MODE: false,
-    HOSTED: {
-      enabled: true,
-      tokenEncryptionKey: 'test-encryption-key',
-      tokenStorePath: '/tmp/test-hosted-tokens.json',
-      sessionStorePath: '/tmp/test-sessions.json',
-      hostedRedirectUri: '',
-    },
-    AUTH_CONFIG: {
-      tokenStorePath: '/tmp/test-tokens.json',
-      clientId: 'test-client-id',
-      clientSecret: 'test-client-secret',
-      tenantId: 'test-tenant-id',
-      tokenEndpoint: 'https://login.microsoftonline.com/test-tenant-id/oauth2/v2.0/token',
-      redirectUri: 'http://localhost:3333/auth/callback',
-      scopes: ['offline_access', 'Mail.Read'],
-    },
-  }));
+  jest.mock('../../config', () => mockMergedConfig);
 
   // Mock PerUserTokenStorage and SessionStore (used by HTTP branch in index.js)
   jest.mock('../../auth/per-user-token-storage', () => {
@@ -159,6 +186,32 @@ describe('Transport selection (index.js)', () => {
 
     // Stdio transport should NOT have been instantiated
     expect(MockStdioServerTransport).not.toHaveBeenCalled();
+  });
+
+  test('should exit before startup when HTTP mode is missing connector config', () => {
+    process.env.MCP_TRANSPORT = 'http';
+    setupMocks({
+      AUTH_CONFIG: {
+        tenantId: 'common',
+      },
+      CONNECTOR_AUTH: {
+        apiAppId: '',
+      },
+    });
+
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit:${code}`);
+    });
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => require('../../index')).toThrow('process.exit:1');
+    expect(mockStartHttpServer).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Hosted HTTP mode requires connector auth configuration.')
+    );
+
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   test('should be case-insensitive: MCP_TRANSPORT=HTTP works', async () => {

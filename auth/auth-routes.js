@@ -12,6 +12,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { getConfiguredServerBaseUrl } = require('./hosted-config');
 
 // ── PKCE helpers ────────────────────────────────────────────────────────
 
@@ -28,11 +29,14 @@ function generatePKCE() {
 // ── Pending auth state (in-memory, per-process) ─────────────────────────
 
 const PENDING_AUTH_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const STATE_TOKEN_VERSION = 1;
+const STATE_TOKEN_VERSION = 2;
+const STATE_ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const STATE_IV_BYTES = 12;
+const DEFAULT_HOSTED_SESSION_EXPIRATION_DAYS = 14;
 
 /**
  * In-memory store for pending authorization requests.
- * Keyed by the random `state` parameter, each entry holds the PKCE
+ * Keyed by the protected `state` parameter, each entry holds the PKCE
  * code verifier and an expiry timestamp.
  *
  * @type {Map<string, { codeVerifier: string, expiresAt: number }>}
@@ -62,7 +66,7 @@ function cleanupConsumedAuthStates() {
   }
 }
 
-function getStateSigningSecret(authConfig) {
+function getStateProtectionSecret(authConfig) {
   return (
     process.env.AUTH_STATE_SECRET ||
     process.env.TOKEN_ENCRYPTION_KEY ||
@@ -71,45 +75,60 @@ function getStateSigningSecret(authConfig) {
   );
 }
 
-function createSignedState({ codeVerifier, expiresAt, secret }) {
+function deriveStateEncryptionKey(secret) {
+  return crypto.createHash('sha256').update(secret, 'utf8').digest();
+}
+
+function createProtectedState({ codeVerifier, expiresAt, secret }) {
+  const key = deriveStateEncryptionKey(secret);
   const payload = JSON.stringify({
     v: STATE_TOKEN_VERSION,
     cv: codeVerifier,
     exp: expiresAt,
     n: crypto.randomBytes(12).toString('base64url'),
   });
-  const payloadB64 = Buffer.from(payload, 'utf8').toString('base64url');
-  const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
-  return `${payloadB64}.${sig}`;
+  const iv = crypto.randomBytes(STATE_IV_BYTES);
+  const cipher = crypto.createCipheriv(STATE_ENCRYPTION_ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(payload, 'utf8'),
+    cipher.final(),
+  ]);
+  const authTag = cipher.getAuthTag();
+
+  return [
+    `v${STATE_TOKEN_VERSION}`,
+    iv.toString('base64url'),
+    ciphertext.toString('base64url'),
+    authTag.toString('base64url'),
+  ].join('.');
 }
 
-function parseSignedState(state, secret) {
+function parseProtectedState(state, secret) {
   if (!state || typeof state !== 'string') {
     return null;
   }
 
   const parts = state.split('.');
-  if (parts.length !== 2) {
+  if (parts.length !== 4) {
     return null;
   }
 
-  const [payloadB64, sig] = parts;
-  if (!payloadB64 || !sig) {
-    return null;
-  }
-
-  const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
-  const actualSigBuf = Buffer.from(sig);
-  const expectedSigBuf = Buffer.from(expectedSig);
-  if (actualSigBuf.length !== expectedSigBuf.length) {
-    return null;
-  }
-  if (!crypto.timingSafeEqual(actualSigBuf, expectedSigBuf)) {
+  const [versionLabel, ivB64, ciphertextB64, authTagB64] = parts;
+  if (versionLabel !== `v${STATE_TOKEN_VERSION}` || !ivB64 || !ciphertextB64 || !authTagB64) {
     return null;
   }
 
   try {
-    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    const key = deriveStateEncryptionKey(secret);
+    const iv = Buffer.from(ivB64, 'base64url');
+    const ciphertext = Buffer.from(ciphertextB64, 'base64url');
+    const authTag = Buffer.from(authTagB64, 'base64url');
+    const decipher = crypto.createDecipheriv(STATE_ENCRYPTION_ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
+    const payloadJson = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]).toString('utf8');
     const payload = JSON.parse(payloadJson);
 
     if (payload?.v !== STATE_TOKEN_VERSION) {
@@ -132,6 +151,23 @@ function parseSignedState(state, secret) {
   } catch {
     return null;
   }
+}
+
+function getHostedSessionExpirationDays(config) {
+  const configured = Number.parseInt(config?.HOSTED?.sessionExpirationDays, 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return DEFAULT_HOSTED_SESSION_EXPIRATION_DAYS;
+}
+
+function applySensitiveAuthResponseHeaders(res) {
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'Referrer-Policy': 'no-referrer',
+  });
 }
 
 function markStateConsumed(state, expiresAt) {
@@ -174,7 +210,7 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
   const clientSecret = authConfig.clientSecret;
   const scopes = authConfig.scopes;
   const redirectUri = authConfig.hostedRedirectUri || authConfig.redirectUri;
-  const stateSigningSecret = getStateSigningSecret(authConfig);
+  const stateProtectionSecret = getStateProtectionSecret(authConfig);
 
   // ── GET /login ─────────────────────────────────────────────────────
 
@@ -186,13 +222,13 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
     // Generate PKCE pair
     const { verifier, challenge } = generatePKCE();
     const expiresAt = Date.now() + PENDING_AUTH_TTL_MS;
-    if (!stateSigningSecret) {
-      return res.status(500).send('Auth state signing secret is not configured');
+    if (!stateProtectionSecret) {
+      return res.status(500).send('Auth state protection secret is not configured');
     }
-    const state = createSignedState({
+    const state = createProtectedState({
       codeVerifier: verifier,
       expiresAt,
-      secret: stateSigningSecret,
+      secret: stateProtectionSecret,
     });
 
     // Store pending auth entry with TTL
@@ -232,8 +268,8 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
     if (typeof code !== 'string' || typeof state !== 'string') {
       return res.status(400).send('Invalid callback parameters');
     }
-    if (!stateSigningSecret) {
-      return res.status(500).send('Auth state signing secret is not configured');
+    if (!stateProtectionSecret) {
+      return res.status(500).send('Auth state protection secret is not configured');
     }
     cleanupConsumedAuthStates();
     if (isStateConsumed(state)) {
@@ -253,8 +289,8 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
       stateExpiresAt = pending.expiresAt;
       pendingAuth.delete(state);
     } else {
-      // Restart / multi-instance fallback: verify signed state payload.
-      const parsed = parseSignedState(state, stateSigningSecret);
+      // Restart / multi-instance fallback: decrypt and verify protected state payload.
+      const parsed = parseProtectedState(state, stateProtectionSecret);
       if (!parsed) {
         return res.status(400).send('Invalid or expired state parameter');
       }
@@ -316,12 +352,15 @@ function createAuthRoutes({ tokenStorage, sessionStore, config, fetch: fetchFn }
       });
 
       // Create session
-      const sessionToken = await sessionStore.createSession(userId);
+      const sessionToken = await sessionStore.createSession(userId, {
+        expiresInDays: getHostedSessionExpirationDays(config),
+      });
 
       // Determine trusted server base URL for the config snippet
-      const serverBase = getTrustedServerBaseUrl(authConfig, config.PORT);
+      const serverBase = getTrustedServerBaseUrl(config, config.PORT);
 
       // Return success HTML
+      applySensitiveAuthResponseHeaders(res);
       res.status(200).send(renderSuccessPage({
         userName,
         userEmail,
@@ -552,21 +591,9 @@ module.exports = {
   _consumedAuthStates: consumedAuthStates,
 };
 
-function getTrustedServerBaseUrl(authConfig, fallbackPort = 3000) {
-  const candidates = [
-    process.env.PUBLIC_BASE_URL,
-    authConfig.hostedRedirectUri,
-    authConfig.redirectUri,
-  ];
-
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      return new URL(candidate).origin;
-    } catch {
-      // Ignore malformed values and continue.
-    }
-  }
-
-  return `http://localhost:${fallbackPort || 3000}`;
+function getTrustedServerBaseUrl(appConfig, fallbackPort = 3000) {
+  return (
+    getConfiguredServerBaseUrl(appConfig) ||
+    `http://localhost:${fallbackPort || 3000}`
+  );
 }

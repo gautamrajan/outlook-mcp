@@ -10,7 +10,8 @@
  */
 const TokenStorage = require('./token-storage');
 const PerUserTokenStorage = require('./per-user-token-storage');
-const { isHostedMode, getUserContext } = require('./request-context');
+const { isHostedMode, getUserContext, getAuthMethod } = require('./request-context');
+const { getGraphToken, clearUserToken } = require('./obo-exchange');
 const config = require('../config');
 const { authTools } = require('./tools');
 
@@ -66,6 +67,11 @@ function setHostedTokenStorage(storage) {
  * @throws {Error} - If authentication fails
  */
 async function ensureAuthenticated({ forceRefresh = false } = {}) {
+  const authMethod = getAuthMethod();
+  if (authMethod === 'connector' || authMethod === 'session') {
+    return _ensureAuthenticatedHosted(forceRefresh);
+  }
+
   if (isHostedMode()) {
     return _ensureAuthenticatedHosted(forceRefresh);
   }
@@ -93,13 +99,47 @@ async function _ensureAuthenticatedLocal(forceRefresh) {
 
 /**
  * Hosted mode authentication — per-user token lookup with silent refresh.
+ *
+ * Supports two auth methods:
+ *   - 'connector': exchanges Entra JWT for Graph token via OBO flow
+ *   - 'session': existing PerUserTokenStorage lookup with silent refresh
+ *
  * @param {boolean} forceRefresh
  * @returns {Promise<string>}
  */
 async function _ensureAuthenticatedHosted(forceRefresh) {
   const ctx = getUserContext();
-  if (!ctx || !ctx.userId) {
-    throw new Error('No user context — session middleware should have set this');
+  if (!ctx) {
+    throw new Error('No user context — auth middleware should have set this');
+  }
+
+  // Connector path: exchange Entra token for Graph token via OBO
+  if (ctx.authMethod === 'connector') {
+    if (!ctx.userId) {
+      const err = new Error('Connector auth context missing userId');
+      err.code = 'AUTH_REQUIRED';
+      throw err;
+    }
+    if (!ctx.entraToken) {
+      const err = new Error('Connector auth context missing entraToken');
+      err.code = 'AUTH_REQUIRED';
+      throw err;
+    }
+    if (forceRefresh) {
+      clearUserToken(ctx.userId);
+    }
+    return getGraphToken(ctx.entraToken, ctx.userId);
+  }
+
+  // Session path: existing PerUserTokenStorage logic (unchanged)
+  if (ctx.authMethod && ctx.authMethod !== 'session') {
+    throw new Error(`Unsupported auth method: ${ctx.authMethod}`);
+  }
+
+  if (!ctx.userId) {
+    const err = new Error('Session auth context missing userId');
+    err.code = 'AUTH_REQUIRED';
+    throw err;
   }
 
   const { userId } = ctx;

@@ -40,6 +40,15 @@ jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   StreamableHTTPServerTransport: MockTransport,
 }));
 
+// Mock jwks-rsa to prevent jose ESM import from blowing up in Jest
+jest.mock('jwks-rsa', () => jest.fn(() => ({ getSigningKey: jest.fn() })));
+
+// Mock jwt-validator — reject by default so session tokens pass through
+// to the session middleware (jwt-middleware silently swallows validation errors)
+jest.mock('../../auth/jwt-validator', () => ({
+  validateEntraJwt: jest.fn().mockRejectedValue(new Error('JWT validation failed: not a JWT')),
+}));
+
 // Mock config
 jest.mock('../../config', () => ({
   SERVER_NAME: 'test-outlook-assistant',
@@ -47,6 +56,10 @@ jest.mock('../../config', () => ({
   AUTH_CONFIG: {
     tenantId: 'test-tenant-id',
     clientId: 'test-client-id',
+  },
+  CONNECTOR_AUTH: {
+    apiAppId: 'api://test-app-id',
+    apiScope: 'mcp.access',
   },
 }));
 
@@ -276,7 +289,7 @@ describe('HTTP Transport Server', () => {
   // ── Request context (AsyncLocalStorage) ──────────────────────────
 
   describe('User context in AsyncLocalStorage', () => {
-    test('wraps request handling in AsyncLocalStorage context', async () => {
+    test('leaves request context unset when no authenticated user is present', async () => {
       let capturedContext = null;
 
       // Override handleRequest to capture the async context
@@ -290,10 +303,7 @@ describe('HTTP Transport Server', () => {
         .post('/mcp')
         .send(initializeBody());
 
-      // Context should exist (user fields are undefined without auth middleware)
-      expect(capturedContext).not.toBeNull();
-      expect(capturedContext).toHaveProperty('userId');
-      expect(capturedContext).toHaveProperty('sessionToken');
+      expect(capturedContext).toBeNull();
     });
 
     test('populates userId and sessionToken from middleware when session is active', async () => {

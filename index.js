@@ -10,6 +10,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const config = require('./config');
+const { getHostedConnectorConfigErrors } = require('./auth/hosted-config');
 
 // Import module tools
 const { authTools } = require('./auth');
@@ -148,6 +149,7 @@ if (transportMode === 'http') {
 
   const hostedConfig = config.HOSTED;
   const allowInsecureTokenStore = process.env.ALLOW_INSECURE_TOKEN_STORE === 'true';
+  const connectorConfigErrors = getHostedConnectorConfigErrors(config);
 
   if (!hostedConfig.tokenEncryptionKey && !allowInsecureTokenStore) {
     console.error(
@@ -159,6 +161,13 @@ if (transportMode === 'http') {
     console.error(
       'WARNING: Hosted token/session stores are running unencrypted because ALLOW_INSECURE_TOKEN_STORE=true.'
     );
+  }
+  if (connectorConfigErrors.length > 0) {
+    console.error(
+      'Hosted HTTP mode requires connector auth configuration. Missing or invalid settings: ' +
+      connectorConfigErrors.join(', ')
+    );
+    process.exit(1);
   }
 
   // Instantiate stores with config-driven paths and encryption
