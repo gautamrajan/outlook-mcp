@@ -79,8 +79,31 @@ function buildWwwAuthenticateChallenge(req) {
   return `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource", scope="${fullScope}"`;
 }
 
+/**
+ * Express handler for GET /.well-known/oauth-authorization-server.
+ *
+ * Returns OAuth Authorization Server Metadata (RFC 8414) that points
+ * Claude to Entra's actual authorize and token endpoints.  Our server
+ * is NOT the authorization server — this is a metadata pass-through.
+ */
+function oauthMetadataHandler(req, res) {
+  const entraBase = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0`;
+
+  res.set('Content-Type', 'application/json');
+  res.json({
+    issuer: `https://login.microsoftonline.com/${tenantId}/v2.0`,
+    authorization_endpoint: `${entraBase}/authorize`,
+    token_endpoint: `${entraBase}/token`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'],
+    scopes_supported: [getFullScope()],
+  });
+}
+
 module.exports = {
   prmHandler,
+  oauthMetadataHandler,
   buildWwwAuthenticateChallenge,
   // Exported for testing
   getBaseUrl,

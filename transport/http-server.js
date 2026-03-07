@@ -17,7 +17,7 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { requestContext } = require('../auth/request-context');
 const { createAuthRoutes } = require('../auth/auth-routes');
-const { prmHandler, buildWwwAuthenticateChallenge } = require('../auth/prm');
+const { prmHandler, oauthMetadataHandler, buildWwwAuthenticateChallenge } = require('../auth/prm');
 const jwtMiddleware = require('../auth/jwt-middleware');
 const config = require('../config');
 
@@ -187,8 +187,9 @@ function createFallbackRequestHandler() {
 function createHttpApp({ sessionStore, tokenStorage } = {}) {
   const app = express();
 
-  // ── Protected Resource Metadata (RFC 9728) — public, no auth ──────
+  // ── Discovery endpoints — public, no auth ──────────────────────────
   app.get('/.well-known/oauth-protected-resource', prmHandler);
+  app.get('/.well-known/oauth-authorization-server', oauthMetadataHandler);
 
   // ── Browser auth routes (login + callback) ────────────────────────
   if (sessionStore && tokenStorage) {
