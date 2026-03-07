@@ -114,12 +114,11 @@ describe('Protected Resource Metadata (auth/prm.js)', () => {
       expect(res.headers['content-type']).toMatch(/application\/json/);
     });
 
-    test('resource field points to /mcp on the server', async () => {
+    test('resource field matches the Application ID URI', async () => {
       const res = await request(app)
         .get('/.well-known/oauth-protected-resource');
 
-      // supertest uses 127.0.0.1 — just verify it ends with /mcp
-      expect(res.body.resource).toMatch(/\/mcp$/);
+      expect(res.body.resource).toBe('api://test-app-id-000');
     });
   });
 

@@ -49,7 +49,7 @@ function prmHandler(req, res) {
 
   res.set('Content-Type', 'application/json');
   res.json({
-    resource: `${baseUrl}/mcp`,
+    resource: apiAppId,
     resource_name: 'MRC Outlook Assistant',
     authorization_servers: [
       `https://login.microsoftonline.com/${tenantId}/v2.0`,

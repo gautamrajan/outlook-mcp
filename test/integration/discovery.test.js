@@ -125,8 +125,8 @@ describe('PRM Discovery & 401 Challenges — Integration', () => {
     expect(res.body).toHaveProperty('scopes_supported');
     expect(res.body).toHaveProperty('bearer_methods_supported');
 
-    // resource should be a URL pointing to /mcp
-    expect(res.body.resource).toBe('https://outlook-mcp.example.com/mcp');
+    // resource should match the Application ID URI (for Entra RFC 8707 compatibility)
+    expect(res.body.resource).toBe(config.CONNECTOR_AUTH.apiAppId);
 
     // authorization_servers should be an array
     expect(Array.isArray(res.body.authorization_servers)).toBe(true);
@@ -301,7 +301,7 @@ describe('PRM Discovery & 401 Challenges — Integration', () => {
       .set('X-Forwarded-Proto', 'http');
 
     expect(prmRes.status).toBe(200);
-    expect(prmRes.body.resource).toBe('https://outlook-mcp.example.com/mcp');
+    expect(prmRes.body.resource).toBe(config.CONNECTOR_AUTH.apiAppId);
 
     const authRes = await supertest(app)
       .post('/mcp')
