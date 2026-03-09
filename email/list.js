@@ -49,7 +49,8 @@ async function handleListEmails(args) {
       const date = formatEmailDate(email.receivedDateTime, ianaTz);
       const readStatus = email.isRead ? '' : '[UNREAD] ';
 
-      return `${index + 1}. ${readStatus}${date} - From: ${sender.name} (${sender.address})\nSubject: ${email.subject}\nID: ${email.id}\n`;
+      const preview = email.bodyPreview ? `\nPreview: ${email.bodyPreview}` : '';
+      return `${index + 1}. ${readStatus}${date} - From: ${sender.name} (${sender.address})\nSubject: ${email.subject}${preview}\nID: ${email.id}\n`;
     }).join("\n");
     
     return {
