@@ -54,7 +54,7 @@ module.exports = {
   CONNECTOR_AUTH: {
     apiAppId: process.env.MCP_API_APP_ID || '',
     apiScope: process.env.MCP_API_SCOPE || '',
-    oboScopes: process.env.OBO_SCOPES || 'Mail.Read Mail.Send Mail.ReadWrite Calendars.ReadWrite Contacts.Read User.Read',
+    oboScopes: process.env.OBO_SCOPES || 'Mail.Read Mail.ReadWrite Calendars.Read Calendars.ReadWrite Contacts.Read User.Read offline_access',
   },
 
   // Microsoft Graph API
