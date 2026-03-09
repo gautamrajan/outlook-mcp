@@ -51,7 +51,9 @@ function validateEntraJwt(token) {
     const options = {
       algorithms: ['RS256'],
       issuer: `https://login.microsoftonline.com/${tenantId}/v2.0`,
-      audience: config.CONNECTOR_AUTH.apiAppId,
+      // Accept both "api://xxx" (identifier URI) and "xxx" (bare app ID) as audience,
+      // because Entra v2.0 tokens may use either depending on how the scope was requested.
+      audience: [config.CONNECTOR_AUTH.apiAppId, config.AUTH_CONFIG.clientId],
     };
 
     jwt.verify(token, getSigningKey, options, (err, decoded) => {
