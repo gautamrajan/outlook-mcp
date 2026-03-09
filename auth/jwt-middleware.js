@@ -42,9 +42,10 @@ async function jwtMiddleware(req, res, next) {
       scp: claims.scp,
     };
     req.entraToken = token;
-  } catch (_err) {
+  } catch (err) {
     // Validation failed — this may be a session token, not a JWT.
-    // Silently pass through; downstream auth decides whether to 401.
+    // Log for diagnostics, then pass through; downstream auth decides whether to 401.
+    console.error('[jwt-middleware] JWT validation failed:', err.message);
   }
 
   next();
