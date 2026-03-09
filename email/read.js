@@ -4,6 +4,7 @@
 const config = require('../config');
 const { callGraphAPI } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
+const { resolveIanaTimezone, formatEmailDate } = require('../utils/date-helpers');
 
 /**
  * Read email handler
@@ -51,7 +52,8 @@ async function handleReadEmail(args) {
       const to = email.toRecipients ? email.toRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
       const cc = email.ccRecipients && email.ccRecipients.length > 0 ? email.ccRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
       const bcc = email.bccRecipients && email.bccRecipients.length > 0 ? email.bccRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
-      const date = new Date(email.receivedDateTime).toLocaleString();
+      const ianaTz = resolveIanaTimezone(config.DEFAULT_TIMEZONE);
+      const date = formatEmailDate(email.receivedDateTime, ianaTz);
       
       // Extract body content
       let body = '';
