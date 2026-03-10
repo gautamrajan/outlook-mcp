@@ -105,12 +105,11 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
         };
         
         // Add the search term in the appropriate KQL syntax
+        // Graph API requires the entire $search value to be wrapped in double quotes
         if (term === 'query') {
-          // General query doesn't need a prefix
           simplifiedParams.$search = `"${searchTerms[term]}"`;
         } else {
-          // Specific field searches use field:value syntax
-          simplifiedParams.$search = `${term}:"${searchTerms[term]}"`;
+          simplifiedParams.$search = `"${term}:${searchTerms[term]}"`;
         }
         
         // Add boolean filters if applicable
@@ -196,20 +195,21 @@ function buildSearchParams(searchTerms, filterTerms, count) {
   }
   
   if (searchTerms.subject) {
-    kqlTerms.push(`subject:"${searchTerms.subject}"`);
+    kqlTerms.push(`subject:${searchTerms.subject}`);
   }
-  
+
   if (searchTerms.from) {
-    kqlTerms.push(`from:"${searchTerms.from}"`);
+    kqlTerms.push(`from:${searchTerms.from}`);
   }
-  
+
   if (searchTerms.to) {
-    kqlTerms.push(`to:"${searchTerms.to}"`);
+    kqlTerms.push(`to:${searchTerms.to}`);
   }
-  
+
   // Add $search if we have any search terms
+  // Graph API requires the entire $search value to be wrapped in double quotes
   if (kqlTerms.length > 0) {
-    params.$search = kqlTerms.join(' ');
+    params.$search = `"${kqlTerms.join(' ')}"`;
   }
   
   // Add boolean filters
