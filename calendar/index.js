@@ -35,10 +35,6 @@ const calendarTools = [
         eventId: {
           type: "string",
           description: "The ID of the event to decline"
-        },
-        comment: {
-          type: "string",
-          description: "Optional comment for declining the event"
         }
       },
       required: ["eventId"]
@@ -122,10 +118,6 @@ const calendarTools = [
         eventId: {
           type: "string",
           description: "The ID of the event to accept"
-        },
-        comment: {
-          type: "string",
-          description: "Optional comment for accepting the event"
         }
       },
       required: ["eventId"]
@@ -141,10 +133,6 @@ const calendarTools = [
         eventId: {
           type: "string",
           description: "The ID of the event to tentatively accept"
-        },
-        comment: {
-          type: "string",
-          description: "Optional comment for tentatively accepting the event"
         }
       },
       required: ["eventId"]

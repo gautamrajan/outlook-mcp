@@ -10,7 +10,7 @@ const { ensureAuthenticated } = require('../auth');
  * @returns {object} - MCP response
  */
 async function handleDeclineEvent(args) {
-  const { eventId, comment } = args;
+  const { eventId } = args;
 
   if (!eventId) {
     return {
@@ -30,7 +30,7 @@ async function handleDeclineEvent(args) {
 
     // Request body
     const body = {
-      comment: comment || "Declined via API"
+      sendResponse: false
     };
 
     // Make API call
@@ -39,7 +39,7 @@ async function handleDeclineEvent(args) {
     return {
       content: [{
         type: "text",
-        text: `Event with ID ${eventId} has been successfully declined.`
+        text: `Event with ID ${eventId} has been successfully declined without sending a response.`
       }]
     };
   } catch (error) {

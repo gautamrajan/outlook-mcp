@@ -8,10 +8,13 @@ jest.mock('../../auth');
 jest.mock('../../email/folder-utils');
 
 const {
+  ENABLE_RECENT_EMAILS_FALLBACK,
   sanitizeKqlValue,
   buildKqlBooleans,
   buildSearchParams,
   addBooleanFilters,
+  progressiveSearch,
+  formatSearchResults,
 } = handleSearchEmails._internal;
 
 const MOCK_TOKEN = 'dummy_access_token';
@@ -272,19 +275,76 @@ describe('progressiveSearch — _searchInfo on fallbacks', () => {
   });
 
   test('final recent-emails fallback attaches _searchInfo', async () => {
-    // Everything fails, final fallback returns results
+    // Everything fails; with fallback disabled, no unrelated recent emails are returned
     callGraphAPIPaginated
       .mockRejectedValueOnce(new Error('fail'))   // combined
       .mockRejectedValueOnce(new Error('fail'))   // single subject
-      .mockRejectedValueOnce(new Error('fail'))   // boolean-only
-      .mockResolvedValueOnce({ value: [mockEmail('1', 'Recent')] }); // final fallback
+      .mockRejectedValueOnce(new Error('fail'));  // boolean-only
 
     const result = await handleSearchEmails({
       subject: 'Budget',
       hasAttachments: true,
     });
 
-    expect(result.content[0].text).toContain('recent-emails');
+    expect(result.content[0].text).toContain('No emails found matching your search criteria.');
+    expect(result.content[0].text).toContain(
+      'Strategies attempted: combined-search, single-term-subject, boolean-filters-only.'
+    );
+    expect(result.content[0].text).toContain(
+      'All search strategies failed. No results returned (recent-emails fallback is disabled).'
+    );
+    expect(callGraphAPIPaginated).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('progressiveSearch — recent-emails fallback flag', () => {
+  test('returns empty results with _searchInfo when recent-emails fallback is disabled', async () => {
+    expect(ENABLE_RECENT_EMAILS_FALLBACK).toBe(false);
+
+    callGraphAPIPaginated
+      .mockRejectedValueOnce(new Error('fail'))   // combined
+      .mockRejectedValueOnce(new Error('fail'))   // single subject
+      .mockRejectedValueOnce(new Error('fail'));  // boolean-only
+
+    const response = await progressiveSearch(
+      MOCK_ENDPOINT,
+      MOCK_TOKEN,
+      { query: '', from: '', to: '', subject: 'Budget' },
+      { hasAttachments: true },
+      10
+    );
+
+    expect(response).toEqual({
+      value: [],
+      _searchInfo: {
+        attemptsCount: 3,
+        strategies: ['combined-search', 'single-term-subject', 'boolean-filters-only'],
+        originalTerms: { query: '', from: '', to: '', subject: 'Budget' },
+        filterTerms: { hasAttachments: true },
+        warning: 'All search strategies failed. No results returned (recent-emails fallback is disabled).'
+      }
+    });
+  });
+});
+
+describe('formatSearchResults', () => {
+  test('includes attempted strategies in no-results message when _searchInfo is present', () => {
+    const result = formatSearchResults({
+      value: [],
+      _searchInfo: {
+        strategies: [
+          'combined-search',
+          'single-term-subject',
+          'single-term-from',
+          'boolean-filters-only'
+        ]
+      }
+    });
+
+    expect(result.content[0].text).toBe(
+      'No emails found matching your search criteria. ' +
+      'Strategies attempted: combined-search, single-term-subject, single-term-from, boolean-filters-only.'
+    );
   });
 });
 

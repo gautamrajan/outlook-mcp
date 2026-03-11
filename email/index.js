@@ -1,6 +1,8 @@
 /**
  * Email module for Outlook MCP server
  */
+const ENABLE_SEND_EMAIL_TOOL = false;
+
 const handleListEmails = require('./list');
 const handleSearchEmails = require('./search');
 const handleReadEmail = require('./read');
@@ -9,6 +11,47 @@ const handleCreateDraft = require('./create-draft');
 const handleMarkAsRead = require('./mark-as-read');
 const handleArchiveEmail = require('./archive-email');
 const handleCreateReplyDraft = require('./create-reply-draft');
+
+const sendEmailTool = {
+  name: "send-email",
+  description: "Composes and sends a new email",
+  inputSchema: {
+    type: "object",
+    properties: {
+      to: {
+        type: "string",
+        description: "Comma-separated list of recipient email addresses"
+      },
+      cc: {
+        type: "string",
+        description: "Comma-separated list of CC recipient email addresses"
+      },
+      bcc: {
+        type: "string",
+        description: "Comma-separated list of BCC recipient email addresses"
+      },
+      subject: {
+        type: "string",
+        description: "Email subject"
+      },
+      body: {
+        type: "string",
+        description: "Email body content (can be plain text or HTML)"
+      },
+      importance: {
+        type: "string",
+        description: "Email importance (normal, high, low)",
+        enum: ["normal", "high", "low"]
+      },
+      saveToSentItems: {
+        type: "boolean",
+        description: "Whether to save the email to sent items"
+      }
+    },
+    required: ["to", "subject", "body"]
+  },
+  handler: handleSendEmail
+};
 
 // Email tool definitions
 const emailTools = [
@@ -89,46 +132,7 @@ const emailTools = [
     },
     handler: handleReadEmail
   },
-  {
-    name: "send-email",
-    description: "Composes and sends a new email",
-    inputSchema: {
-      type: "object",
-      properties: {
-        to: {
-          type: "string",
-          description: "Comma-separated list of recipient email addresses"
-        },
-        cc: {
-          type: "string",
-          description: "Comma-separated list of CC recipient email addresses"
-        },
-        bcc: {
-          type: "string",
-          description: "Comma-separated list of BCC recipient email addresses"
-        },
-        subject: {
-          type: "string",
-          description: "Email subject"
-        },
-        body: {
-          type: "string",
-          description: "Email body content (can be plain text or HTML)"
-        },
-        importance: {
-          type: "string",
-          description: "Email importance (normal, high, low)",
-          enum: ["normal", "high", "low"]
-        },
-        saveToSentItems: {
-          type: "boolean",
-          description: "Whether to save the email to sent items"
-        }
-      },
-      required: ["to", "subject", "body"]
-    },
-    handler: handleSendEmail
-  },
+  ...(ENABLE_SEND_EMAIL_TOOL ? [sendEmailTool] : []),
   {
     name: "create-draft",
     description: "Creates an email draft in the Drafts folder without sending it",
@@ -230,6 +234,7 @@ const emailTools = [
 
 module.exports = {
   emailTools,
+  ENABLE_SEND_EMAIL_TOOL,
   handleListEmails,
   handleSearchEmails,
   handleReadEmail,

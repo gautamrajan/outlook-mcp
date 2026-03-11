@@ -10,7 +10,7 @@ const { ensureAuthenticated } = require('../auth');
  * @returns {object} - MCP response
  */
 async function handleAcceptEvent(args) {
-  const { eventId, comment } = args;
+  const { eventId } = args;
 
   if (!eventId) {
     return {
@@ -30,7 +30,7 @@ async function handleAcceptEvent(args) {
 
     // Request body
     const body = {
-      comment: comment || "Accepted via API"
+      sendResponse: false
     };
 
     // Make API call
@@ -39,7 +39,7 @@ async function handleAcceptEvent(args) {
     return {
       content: [{
         type: "text",
-        text: `Event with ID ${eventId} has been successfully accepted.`
+        text: `Event with ID ${eventId} has been successfully accepted without sending a response.`
       }]
     };
   } catch (error) {

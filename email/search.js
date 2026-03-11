@@ -1,6 +1,8 @@
 /**
  * Improved search emails functionality
  */
+const ENABLE_RECENT_EMAILS_FALLBACK = false;
+
 const config = require('../config');
 const { callGraphAPI, callGraphAPIPaginated } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
@@ -242,28 +244,41 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
     }
   }
   
-  // 4. Final fallback: just get recent emails with pagination
-  console.error("All search strategies failed, falling back to recent emails");
-  searchAttempts.push("recent-emails");
-  
-  const basicParams = {
-    $top: Math.min(50, maxCount),
-    $select: config.EMAIL_SELECT_FIELDS,
-    $orderby: 'receivedDateTime desc'
+  if (ENABLE_RECENT_EMAILS_FALLBACK) {
+    // 4. Final fallback: just get recent emails with pagination
+    console.error("All search strategies failed, falling back to recent emails");
+    searchAttempts.push("recent-emails");
+    
+    const basicParams = {
+      $top: Math.min(50, maxCount),
+      $select: config.EMAIL_SELECT_FIELDS,
+      $orderby: 'receivedDateTime desc'
+    };
+    
+    const response = await callGraphAPIPaginated(accessToken, 'GET', endpoint, basicParams, maxCount);
+    console.error(`Fallback to recent emails found ${response.value?.length || 0} results`);
+    
+    // Add a note to the response about the search attempts
+    response._searchInfo = {
+      attemptsCount: searchAttempts.length,
+      strategies: searchAttempts,
+      originalTerms: searchTerms,
+      filterTerms: filterTerms
+    };
+    
+    return response;
+  }
+
+  return {
+    value: [],
+    _searchInfo: {
+      attemptsCount: searchAttempts.length,
+      strategies: searchAttempts,
+      originalTerms: searchTerms,
+      filterTerms: filterTerms,
+      warning: 'All search strategies failed. No results returned (recent-emails fallback is disabled).'
+    }
   };
-  
-  const response = await callGraphAPIPaginated(accessToken, 'GET', endpoint, basicParams, maxCount);
-  console.error(`Fallback to recent emails found ${response.value?.length || 0} results`);
-  
-  // Add a note to the response about the search attempts
-  response._searchInfo = {
-    attemptsCount: searchAttempts.length,
-    strategies: searchAttempts,
-    originalTerms: searchTerms,
-    filterTerms: filterTerms
-  };
-  
-  return response;
 }
 
 /**
@@ -343,10 +358,21 @@ function addBooleanFilters(params, filterTerms) {
  */
 function formatSearchResults(response) {
   if (!response.value || response.value.length === 0) {
+    let text = 'No emails found matching your search criteria.';
+    if (response._searchInfo) {
+      const attemptedStrategies = response._searchInfo.strategies?.join(', ');
+      if (attemptedStrategies) {
+        text += ` Strategies attempted: ${attemptedStrategies}.`;
+      }
+      if (response._searchInfo.warning) {
+        text += ` ${response._searchInfo.warning}`;
+      }
+    }
+
     return {
       content: [{ 
         type: "text", 
-        text: `No emails found matching your search criteria.`
+        text
       }]
     };
   }
@@ -380,6 +406,7 @@ module.exports = handleSearchEmails;
 
 // Export internals for testing
 module.exports._internal = {
+  ENABLE_RECENT_EMAILS_FALLBACK,
   sanitizeKqlValue,
   buildKqlBooleans,
   applyPostFilters,
