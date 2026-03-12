@@ -1,6 +1,7 @@
 const http = require('http');
 const querystring = require('querystring');
 const config = require('../config');
+const { handleAttachmentDownloadRequest } = require('../email/download-route');
 
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_PORT = 3333;
@@ -41,6 +42,15 @@ function _handleRequest(req, res) {
     _handleAuthRedirect(parsedUrl, res);
   } else if (pathname === '/auth/callback') {
     _handleCallback(parsedUrl, res);
+  } else if (pathname.startsWith('/attachments/download/')) {
+    const token = pathname.split('/').pop();
+    handleAttachmentDownloadRequest(req, res, { token }).catch((error) => {
+      console.error(`[embedded-auth] Attachment download failed: ${error.message}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Failed to handle attachment download.');
+      }
+    });
   } else if (pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(`<html><body style="font-family:sans-serif;text-align:center;margin-top:60px;">
@@ -145,16 +155,31 @@ function _resolveAuth(success) {
  * If the server is already running, returns the existing URL.
  */
 function startAuthServer(port = DEFAULT_PORT) {
-  if (_server && _server.listening) {
-    console.error(`[embedded-auth] Server already running on port ${_activePort}`);
-    _state = 'waiting';
-    return Promise.resolve(`http://localhost:${_activePort}`);
-  }
-
   _state = 'waiting';
   _authCompletePromise = new Promise((resolve) => {
     _authCompleteResolve = resolve;
   });
+
+  return startEmbeddedServer(port).then((serverUrl) => {
+    if (_timeoutHandle) {
+      clearTimeout(_timeoutHandle);
+    }
+    _timeoutHandle = setTimeout(() => {
+      console.error('[embedded-auth] Auth timeout reached, stopping server.');
+      _state = 'idle';
+      _resolveAuth(false);
+      stopAuthServer();
+    }, AUTH_TIMEOUT_MS);
+
+    return serverUrl;
+  });
+}
+
+function startEmbeddedServer(port = DEFAULT_PORT) {
+  if (_server && _server.listening) {
+    console.error(`[embedded-auth] Server already running on port ${_activePort}`);
+    return Promise.resolve(`http://localhost:${_activePort}`);
+  }
 
   return new Promise((resolve, reject) => {
     _server = http.createServer(_handleRequest);
@@ -163,7 +188,7 @@ function startAuthServer(port = DEFAULT_PORT) {
       if (err.code === 'EADDRINUSE') {
         console.error(`[embedded-auth] Port ${port} in use, trying ${port + 1}`);
         _server.close();
-        resolve(startAuthServer(port + 1));
+        resolve(startEmbeddedServer(port + 1));
       } else {
         _state = 'error';
         reject(err);
@@ -171,17 +196,10 @@ function startAuthServer(port = DEFAULT_PORT) {
     });
 
     _server.listen(port, () => {
-      _activePort = port;
-      console.error(`[embedded-auth] Auth server started on port ${port}`);
-
-      _timeoutHandle = setTimeout(() => {
-        console.error('[embedded-auth] Auth timeout reached, stopping server.');
-        _state = 'idle';
-        _resolveAuth(false);
-        stopAuthServer();
-      }, AUTH_TIMEOUT_MS);
-
-      resolve(`http://localhost:${port}`);
+      const address = _server.address();
+      _activePort = typeof address === 'object' && address ? address.port : port;
+      console.error(`[embedded-auth] Auth server started on port ${_activePort}`);
+      resolve(`http://localhost:${_activePort}`);
     });
   });
 }
@@ -190,6 +208,7 @@ function startAuthServer(port = DEFAULT_PORT) {
  * Stop the embedded auth HTTP server.
  */
 function stopAuthServer() {
+  return new Promise((resolve) => {
   if (_timeoutHandle) {
     clearTimeout(_timeoutHandle);
     _timeoutHandle = null;
@@ -197,13 +216,17 @@ function stopAuthServer() {
   if (_server) {
     _server.close(() => {
       console.error('[embedded-auth] Auth server stopped.');
+      resolve();
     });
     _server = null;
     _activePort = null;
+  } else {
+    resolve();
   }
   if (_state === 'waiting') {
     _state = 'idle';
   }
+  });
 }
 
 /**
@@ -219,4 +242,4 @@ function getServerStatus() {
   };
 }
 
-module.exports = { startAuthServer, stopAuthServer, getServerStatus };
+module.exports = { startAuthServer, startEmbeddedServer, stopAuthServer, getServerStatus };

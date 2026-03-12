@@ -391,10 +391,11 @@ describe('Connector Auth Flow — Integration', () => {
       .set('Content-Type', 'application/json')
       .send(initializeBody());
 
-    expect(capturedContext).toEqual({
+    expect(capturedContext).toMatchObject({
       userId: oid,
       authMethod: 'connector',
       entraToken: token,
     });
+    expect(capturedContext.serverBaseUrl).toMatch(/^http:\/\/(127\.0\.0\.1|localhost):\d+$/);
   });
 });

@@ -2,6 +2,7 @@
  * Microsoft Graph API helper functions
  */
 const https = require('https');
+const { Readable } = require('stream');
 const config = require('../config');
 const mockData = require('./mock-data');
 
@@ -119,6 +120,53 @@ async function callGraphAPI(accessToken, method, path, data = null, queryParams 
   }
 }
 
+function _streamGraphAPIOnce(accessToken, finalUrl, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(finalUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        ...extraHeaders
+      }
+    }, (res) => {
+      resolve({
+        statusCode: res.statusCode,
+        headers: res.headers,
+        stream: res,
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(new Error(`Network error during API call: ${error.message}`));
+    });
+
+    req.end();
+  });
+}
+
+async function streamGraphAPI(accessToken, path, queryParams = {}, extraHeaders = {}) {
+  if (config.USE_TEST_MODE && accessToken.startsWith('test_access_token_')) {
+    console.error(`TEST MODE: Simulating stream GET ${path} API call`);
+    return mockData.simulateGraphAPIStreamResponse('GET', path, queryParams);
+  }
+
+  console.error(`Making real stream API call: GET ${path}`);
+  const finalUrl = _buildUrl(path, queryParams);
+
+  const response = await _streamGraphAPIOnce(accessToken, finalUrl, extraHeaders);
+  if (response.statusCode !== 401) {
+    return response;
+  }
+
+  if (response.stream instanceof Readable && typeof response.stream.destroy === 'function') {
+    response.stream.destroy();
+  }
+
+  console.error('Got 401 — forcing token refresh and retrying stream request.');
+  const newToken = await getEnsureAuthenticated()({ forceRefresh: true });
+  return _streamGraphAPIOnce(newToken, finalUrl, extraHeaders);
+}
+
 /**
  * Calls Graph API with pagination support to retrieve all results up to maxCount.
  * Each page request benefits from the 401 retry in callGraphAPI.
@@ -165,5 +213,6 @@ async function callGraphAPIPaginated(accessToken, method, path, queryParams = {}
 
 module.exports = {
   callGraphAPI,
-  callGraphAPIPaginated
+  callGraphAPIPaginated,
+  streamGraphAPI
 };

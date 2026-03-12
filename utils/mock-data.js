@@ -1,6 +1,7 @@
 /**
  * Mock data functions for test mode
  */
+const { Readable } = require('stream');
 
 /**
  * Simulates Microsoft Graph API responses for testing
@@ -14,6 +15,29 @@ function simulateGraphAPIResponse(method, path, data, queryParams) {
   console.error(`Simulating response for: ${method} ${path}`);
   
   if (method === 'GET') {
+    if (path.includes('/attachments') && !path.endsWith('/$value')) {
+      return {
+        value: [
+          {
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            id: 'simulated-attachment-file',
+            name: 'report.txt',
+            contentType: 'text/plain',
+            size: 128,
+            isInline: false,
+          },
+          {
+            '@odata.type': '#microsoft.graph.referenceAttachment',
+            id: 'simulated-attachment-reference',
+            name: 'shared-link.url',
+            contentType: 'application/octet-stream',
+            size: 64,
+            isInline: false,
+          }
+        ]
+      };
+    }
+
     if (path.includes('messages') && !path.includes('sendMail')) {
       // Simulate a successful email list/search response
       if (path.includes('/messages/')) {
@@ -140,6 +164,36 @@ function simulateGraphAPIResponse(method, path, data, queryParams) {
   return {};
 }
 
+/**
+ * Simulates streaming Microsoft Graph API responses for testing.
+ * @param {string} method - HTTP method
+ * @param {string} path - API path
+ * @returns {{statusCode: number, headers: object, stream: import('stream').Readable}}
+ */
+function simulateGraphAPIStreamResponse(method, path) {
+  console.error(`Simulating stream response for: ${method} ${path}`);
+
+  if (method === 'GET' && path.includes('/attachments/') && path.endsWith('/$value')) {
+    const payload = Buffer.from('Simulated attachment content\n', 'utf8');
+    return {
+      statusCode: 200,
+      headers: {
+        'content-type': 'text/plain',
+        'content-length': String(payload.length),
+      },
+      stream: Readable.from(payload),
+    };
+  }
+
+  return {
+    statusCode: 404,
+    headers: { 'content-type': 'text/plain' },
+    stream: Readable.from(Buffer.from('Not found', 'utf8')),
+  };
+}
+
 module.exports = {
   simulateGraphAPIResponse
+  ,
+  simulateGraphAPIStreamResponse
 };

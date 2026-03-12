@@ -67,6 +67,12 @@ describe('config', () => {
     expect(config.MAX_RESULT_COUNT).toBe(50);
   });
 
+  test('should export attachment download limits', () => {
+    const config = require('../config');
+    expect(config.ATTACHMENT_DOWNLOAD_TTL_MS).toBe(5 * 60 * 1000);
+    expect(config.MAX_ATTACHMENT_DOWNLOAD_BYTES).toBe(25 * 1024 * 1024);
+  });
+
   test('should export DEFAULT_TIMEZONE', () => {
     const config = require('../config');
     expect(config.DEFAULT_TIMEZONE).toBeDefined();

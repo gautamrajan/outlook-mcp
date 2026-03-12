@@ -17,9 +17,11 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { requestContext } = require('../auth/request-context');
 const { createAuthRoutes } = require('../auth/auth-routes');
+const { getServerBaseUrl } = require('../auth/hosted-config');
 const { prmHandler, oauthMetadataHandler, buildWwwAuthenticateChallenge } = require('../auth/prm');
 const jwtMiddleware = require('../auth/jwt-middleware');
 const config = require('../config');
+const { handleAttachmentDownloadRequest } = require('../email/download-route');
 
 // Import module tools
 const { authTools } = require('../auth');
@@ -201,6 +203,10 @@ function createHttpApp({ sessionStore, tokenStorage } = {}) {
     app.use('/auth', authRouter);
   }
 
+  app.get('/attachments/download/:token', async (req, res) => {
+    await handleAttachmentDownloadRequest(req, res, { token: req.params.token });
+  });
+
   // ── JWT auth middleware (connector path) ────────────────────────
   app.use('/mcp', jwtMiddleware);
 
@@ -214,17 +220,20 @@ function createHttpApp({ sessionStore, tokenStorage } = {}) {
   // NOTE: We do NOT use express.json() — the StreamableHTTPServerTransport
   // handles body parsing internally.
   app.all('/mcp', async (req, res) => {
+    const serverBaseUrl = getServerBaseUrl(config, req);
     const userCtx = hasValidEntraPrincipal(req)
       ? {
           userId: req.entraUser.oid,
           authMethod: 'connector',
           entraToken: req.entraToken,
+          serverBaseUrl,
         }
       : req.user?.id
         ? {
           userId: req.user?.id,
           authMethod: 'session',
           sessionToken: req.user?.sessionToken,
+          serverBaseUrl,
         }
         : null;
 

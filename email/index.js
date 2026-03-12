@@ -7,6 +7,8 @@ const handleListEmails = require('./list');
 const handleSearchEmails = require('./search');
 const handleReadEmail = require('./read');
 const handleSendEmail = require('./send');
+const handleListAttachments = require('./list-attachments');
+const handleGetAttachmentDownloadUrl = require('./get-attachment-download-url');
 const handleCreateDraft = require('./create-draft');
 const handleMarkAsRead = require('./mark-as-read');
 const handleArchiveEmail = require('./archive-email');
@@ -132,6 +134,40 @@ const emailTools = [
     },
     handler: handleReadEmail
   },
+  {
+    name: "list-attachments",
+    description: "Lists attachments for a specific email",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: {
+          type: "string",
+          description: "ID of the email whose attachments should be listed"
+        }
+      },
+      required: ["emailId"]
+    },
+    handler: handleListAttachments
+  },
+  {
+    name: "get-attachment-download-url",
+    description: "Creates a one-time download URL for an email attachment",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: {
+          type: "string",
+          description: "ID of the email containing the attachment"
+        },
+        attachmentId: {
+          type: "string",
+          description: "ID of the attachment to download"
+        }
+      },
+      required: ["emailId", "attachmentId"]
+    },
+    handler: handleGetAttachmentDownloadUrl
+  },
   ...(ENABLE_SEND_EMAIL_TOOL ? [sendEmailTool] : []),
   {
     name: "create-draft",
@@ -239,6 +275,8 @@ module.exports = {
   handleSearchEmails,
   handleReadEmail,
   handleSendEmail,
+  handleListAttachments,
+  handleGetAttachmentDownloadUrl,
   handleCreateDraft,
   handleMarkAsRead,
   handleArchiveEmail,

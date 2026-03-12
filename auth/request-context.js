@@ -7,22 +7,22 @@
  * The context shape depends on the authentication method:
  *
  *   Session-based auth:
- *     { userId: string, authMethod: 'session', sessionToken: string }
+ *     { userId: string, authMethod: 'session', sessionToken: string, serverBaseUrl?: string }
  *
  *   Connector (Entra JWT) auth:
- *     { userId: string, authMethod: 'connector', entraToken: string }
+ *     { userId: string, authMethod: 'connector', entraToken: string, serverBaseUrl?: string }
  *
  * Usage:
  *   const { requestContext, getUserContext } = require('./request-context');
  *
  *   // Wrap a request handler:
- *   requestContext.run({ userId: 'oid-123', authMethod: 'connector', entraToken: 'jwt...' }, () => {
+ *   requestContext.run({ userId: 'oid-123', authMethod: 'connector', entraToken: 'jwt...', serverBaseUrl: 'https://mcp.example.com' }, () => {
  *     // ... inside here, getUserContext() returns the context
  *   });
  *
  *   // Read context from anywhere on the call stack:
  *   const ctx = getUserContext();
- *   // { userId, authMethod, entraToken } or { userId, authMethod, sessionToken } or null
+ *   // { userId, authMethod, entraToken, serverBaseUrl } or { userId, authMethod, sessionToken, serverBaseUrl } or null
  */
 
 const { AsyncLocalStorage } = require('node:async_hooks');
@@ -31,7 +31,7 @@ const requestContext = new AsyncLocalStorage();
 
 /**
  * Returns the user context for the current request, or null if none is set.
- * @returns {{ userId: string, authMethod: 'session', sessionToken: string } | { userId: string, authMethod: 'connector', entraToken: string } | null}
+ * @returns {{ userId: string, authMethod: 'session', sessionToken: string, serverBaseUrl?: string } | { userId: string, authMethod: 'connector', entraToken: string, serverBaseUrl?: string } | null}
  */
 function getUserContext() {
   return requestContext.getStore() || null;

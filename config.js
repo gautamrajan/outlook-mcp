@@ -66,6 +66,8 @@ module.exports = {
   // Email constants
   EMAIL_SELECT_FIELDS: 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,hasAttachments,importance,isRead',
   EMAIL_DETAIL_FIELDS: 'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,bodyPreview,body,hasAttachments,importance,isRead,internetMessageHeaders',
+  ATTACHMENT_DOWNLOAD_TTL_MS: 5 * 60 * 1000,
+  MAX_ATTACHMENT_DOWNLOAD_BYTES: 25 * 1024 * 1024,
   
   // Calendar constants
   CALENDAR_SELECT_FIELDS: 'id,subject,bodyPreview,start,end,location,organizer,attendees,isAllDay,isCancelled',
