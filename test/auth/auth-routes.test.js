@@ -38,6 +38,9 @@ function createMockConfig() {
       hostedRedirectUri: 'https://outlook-mcp.example.com/auth/callback',
       scopes: ['offline_access', 'Mail.Read', 'User.Read'],
     },
+    HOSTED: {
+      sessionExpirationDays: 14,
+    },
     PORT: 3000,
   };
 }
@@ -195,6 +198,24 @@ describe('GET /auth/login', () => {
     expect(entry.expiresAt).toBeGreaterThan(Date.now());
   });
 
+  test('state token does not expose the stored PKCE verifier', async () => {
+    const { app } = createTestApp();
+
+    const res = await supertest(app)
+      .get('/auth/login')
+      .expect(302);
+
+    const url = new URL(res.headers.location);
+    const state = url.searchParams.get('state');
+    const entry = _pendingAuth.get(state);
+
+    expect(state).toBeTruthy();
+    expect(entry).toBeDefined();
+    expect(state).not.toContain(entry.codeVerifier);
+    expect(state.split('.')).toHaveLength(4);
+    expect(state.startsWith('v2.')).toBe(true);
+  });
+
   test('PKCE challenge in URL matches stored verifier', async () => {
     const { app } = createTestApp();
 
@@ -289,13 +310,24 @@ describe('GET /auth/callback — success', () => {
     const { sessionStore } = await performAuthFlow();
 
     expect(sessionStore.createSession).toHaveBeenCalledTimes(1);
-    expect(sessionStore.createSession).toHaveBeenCalledWith('user-oid-123');
+    expect(sessionStore.createSession).toHaveBeenCalledWith('user-oid-123', {
+      expiresInDays: 14,
+    });
   });
 
   test('returns HTML containing the session token', async () => {
     const { callbackRes } = await performAuthFlow();
 
     expect(callbackRes.text).toContain('mock-session-token-uuid');
+  });
+
+  test('marks the callback success page as non-cacheable', async () => {
+    const { callbackRes } = await performAuthFlow();
+
+    expect(callbackRes.headers['cache-control']).toBe('no-store, no-cache, must-revalidate, private');
+    expect(callbackRes.headers.pragma).toBe('no-cache');
+    expect(callbackRes.headers.expires).toBe('0');
+    expect(callbackRes.headers['referrer-policy']).toBe('no-referrer');
   });
 
   test('returns HTML containing the MCP config snippet', async () => {
@@ -355,7 +387,7 @@ describe('GET /auth/callback — success', () => {
       .expect(400);
   });
 
-  test('callback succeeds when pending map entry is missing but signed state is valid', async () => {
+  test('callback succeeds when pending map entry is missing but protected state is valid', async () => {
     const mockFetch = createMockFetch();
     const testApp = createTestApp({ fetch: mockFetch });
     const { app, fetch } = testApp;

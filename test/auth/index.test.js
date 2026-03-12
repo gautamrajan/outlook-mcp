@@ -46,6 +46,9 @@ beforeEach(() => {
       redirectUri: 'http://localhost:3333/auth/callback',
       scopes: ['offline_access', 'Mail.Read', 'Mail.ReadWrite', 'User.Read', 'Calendars.Read'],
     },
+    CONNECTOR_AUTH: {
+      oboScopes: 'Mail.Read User.Read',
+    },
   }));
 
   // Set up TokenStorage mock constructor
@@ -366,6 +369,29 @@ describe('auth/index.js', () => {
           return ensureAuthenticated();
         })
       ).rejects.toThrow('Authentication required');
+    });
+
+    test('should fail closed for malformed connector context instead of using local token storage', async () => {
+      mockTokenStorageInstance.getValidAccessToken.mockResolvedValue('local-token-that-must-not-be-used');
+
+      const malformedConnectorCtx = {
+        authMethod: 'connector',
+        entraToken: 'entra-jwt-token',
+      };
+
+      let caughtErr;
+      try {
+        await requestContext.run(malformedConnectorCtx, async () => {
+          return ensureAuthenticated();
+        });
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeDefined();
+      expect(caughtErr.code).toBe('AUTH_REQUIRED');
+      expect(caughtErr.message).toMatch(/missing userId/i);
+      expect(mockTokenStorageInstance.getValidAccessToken).not.toHaveBeenCalled();
     });
 
     // ── 6. forceRefresh=true ───────────────────────────────────────────

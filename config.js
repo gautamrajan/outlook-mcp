@@ -6,7 +6,12 @@ const os = require('os');
 
 // Ensure we have a home directory path even if process.env.HOME is undefined
 const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir() || '/tmp';
-const tenantId = process.env.OUTLOOK_TENANT_ID || process.env.MS_TENANT_ID || 'common';
+const tenantId = process.env.OUTLOOK_TENANT_ID || process.env.MS_TENANT_ID || 'common'; // For connector auth, set to a specific tenant ID
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 module.exports = {
   // Server information
@@ -26,7 +31,9 @@ module.exports = {
     tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY || '',
     tokenStorePath: process.env.TOKEN_STORE_PATH || path.join(homeDir, '.outlook-mcp-hosted-tokens.json'),
     sessionStorePath: process.env.SESSION_STORE_PATH || path.join(homeDir, '.outlook-mcp-sessions.json'),
+    publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
     hostedRedirectUri: process.env.HOSTED_REDIRECT_URI || '',  // e.g. https://myserver.com/auth/callback
+    sessionExpirationDays: parsePositiveInt(process.env.HOSTED_SESSION_EXPIRATION_DAYS, 14),
   },
 
   // Authentication configuration
@@ -43,6 +50,13 @@ module.exports = {
     hostedTokenStorePath: process.env.TOKEN_STORE_PATH || path.join(homeDir, '.outlook-mcp-hosted-tokens.json'),
   },
   
+  // Connector auth (Entra JWT + OBO)
+  CONNECTOR_AUTH: {
+    apiAppId: process.env.MCP_API_APP_ID || '',
+    apiScope: process.env.MCP_API_SCOPE || '',
+    oboScopes: process.env.OBO_SCOPES || 'Mail.Read Mail.ReadWrite Calendars.Read Calendars.ReadWrite Contacts.Read User.Read offline_access',
+  },
+
   // Microsoft Graph API
   GRAPH_API_ENDPOINT: 'https://graph.microsoft.com/v1.0/',
   
@@ -52,6 +66,8 @@ module.exports = {
   // Email constants
   EMAIL_SELECT_FIELDS: 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,hasAttachments,importance,isRead',
   EMAIL_DETAIL_FIELDS: 'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,bodyPreview,body,hasAttachments,importance,isRead,internetMessageHeaders',
+  ATTACHMENT_DOWNLOAD_TTL_MS: 5 * 60 * 1000,
+  MAX_ATTACHMENT_DOWNLOAD_BYTES: 25 * 1024 * 1024,
   
   // Calendar constants
   CALENDAR_SELECT_FIELDS: 'id,subject,bodyPreview,start,end,location,organizer,attendees,isAllDay,isCancelled',

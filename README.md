@@ -19,6 +19,7 @@ Certified by MCPHub https://mcphub.com/mcp-servers/ryaker/outlook-mcp
 │   ├── index.js             # Calendar exports
 │   ├── list.js              # List events
 │   ├── create.js            # Create event
+│   ├── update.js            # Update event
 │   ├── delete.js            # Delete event
 │   ├── cancel.js            # Cancel
 │   ├── accept.js            # Accept event
@@ -40,7 +41,7 @@ Certified by MCPHub https://mcphub.com/mcp-servers/ryaker/outlook-mcp
 
 - **Authentication**: OAuth 2.0 authentication with Microsoft Graph API
 - **Email Management**: List, search, read, and send emails
-- **Calendar Management**: List, create, accept, decline, and delete calendar events
+- **Calendar Management**: List, create, update, accept, decline, and delete calendar events
 - **Modular Structure**: Clean separation of concerns for better maintainability
 - **OData Filter Handling**: Proper escaping and formatting of OData queries
 - **Test Mode**: Simulated responses for testing without real API calls

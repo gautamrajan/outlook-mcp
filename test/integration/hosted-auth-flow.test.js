@@ -44,8 +44,15 @@ function mockBuildTestConfig() {
       tokenStorePath: '/tmp/integ-test-tokens.json',
       hostedTokenStorePath: '/tmp/integ-test-hosted-tokens.json',
     },
+    HOSTED: {
+      sessionExpirationDays: 14,
+    },
     SERVER_NAME: 'outlook-assistant-integ',
     SERVER_VERSION: '1.0.0-test',
+    CONNECTOR_AUTH: {
+      apiAppId: 'api://integ-app-id',
+      apiScope: 'mcp.access',
+    },
   };
 }
 
@@ -119,6 +126,14 @@ describe('Hosted Auth Flow — Integration', () => {
 
     beforeEach(() => {
       jest.resetModules();
+
+      // Mock jwks-rsa to prevent jose ESM import from blowing up in Jest
+      jest.mock('jwks-rsa', () => jest.fn(() => ({ getSigningKey: jest.fn() })));
+
+      // Mock jwt-validator — reject by default (session tokens are not valid JWTs)
+      jest.mock('../../auth/jwt-validator', () => ({
+        validateEntraJwt: jest.fn().mockRejectedValue(new Error('JWT validation failed: not a JWT')),
+      }));
 
       // Mock MCP SDK
       jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
@@ -198,8 +213,10 @@ describe('Hosted Auth Flow — Integration', () => {
 
     test('3b. Expired session → 401', async () => {
       const sessionStore = createInMemorySessionStore();
-      // Create a session that expires immediately (0 days)
-      const token = await sessionStore.createSession('user-expired', { expiresInDays: 0 });
+      // Create a session, then manually set its expiry to the past
+      const token = await sessionStore.createSession('user-expired', { expiresInDays: 1 });
+      const session = sessionStore._sessions.get(token);
+      session.expiresAt = new Date(Date.now() - 1000).toISOString(); // expired 1s ago
       const app = createHttpApp({ sessionStore });
 
       const res = await supertest(app)
@@ -266,6 +283,7 @@ describe('Hosted Auth Flow — Integration', () => {
       // Verify the challenge matches the stored verifier
       const pending = _pendingAuth.get(state);
       expect(pending).toBeDefined();
+      expect(state).not.toContain(pending.codeVerifier);
       const expectedChallenge = crypto
         .createHash('sha256')
         .update(pending.codeVerifier)
@@ -284,6 +302,11 @@ describe('Hosted Auth Flow — Integration', () => {
         .get('/auth/callback')
         .query({ code: 'integ-auth-code', state })
         .expect(200);
+
+      expect(callbackRes.headers['cache-control']).toBe('no-store, no-cache, must-revalidate, private');
+      expect(callbackRes.headers.pragma).toBe('no-cache');
+      expect(callbackRes.headers.expires).toBe('0');
+      expect(callbackRes.headers['referrer-policy']).toBe('no-referrer');
 
       // Verify tokens were stored in the REAL PerUserTokenStorage
       const storedToken = tokenStorage.getTokenForUser('user-oid-integ-1');
@@ -308,6 +331,7 @@ describe('Hosted Auth Flow — Integration', () => {
       const activeSessions = sessionStore.getActiveSessions();
       expect(activeSessions.length).toBe(1);
       expect(activeSessions[0].userId).toBe('user-oid-integ-1');
+      expect(activeSessions[0].expiresAt).not.toBeNull();
     });
 
     test('5b. Callback stores tokens that are retrievable and non-expired', async () => {
@@ -590,6 +614,14 @@ describe('Hosted Auth Flow — Integration', () => {
   describe('End-to-end: auth flow → MCP request', () => {
     test('user authenticates via browser then uses session token for MCP', async () => {
       jest.resetModules();
+
+      // Mock jwks-rsa to prevent jose ESM import from blowing up in Jest
+      jest.mock('jwks-rsa', () => jest.fn(() => ({ getSigningKey: jest.fn() })));
+
+      // Mock jwt-validator — reject by default (session tokens are not valid JWTs)
+      jest.mock('../../auth/jwt-validator', () => ({
+        validateEntraJwt: jest.fn().mockRejectedValue(new Error('JWT validation failed: not a JWT')),
+      }));
 
       // Mock MCP SDK
       jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({

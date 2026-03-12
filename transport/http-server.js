@@ -17,7 +17,11 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { requestContext } = require('../auth/request-context');
 const { createAuthRoutes } = require('../auth/auth-routes');
+const { getServerBaseUrl } = require('../auth/hosted-config');
+const { prmHandler, oauthMetadataHandler, buildWwwAuthenticateChallenge } = require('../auth/prm');
+const jwtMiddleware = require('../auth/jwt-middleware');
 const config = require('../config');
+const { handleAttachmentDownloadRequest } = require('../email/download-route');
 
 // Import module tools
 const { authTools } = require('../auth');
@@ -35,20 +39,35 @@ const TOOLS = [
   ...rulesTools,
 ];
 
+function hasValidEntraPrincipal(req) {
+  return !!(req.entraUser && typeof req.entraUser.oid === 'string' && req.entraUser.oid.length > 0);
+}
+
 /**
  * Create Express middleware that validates session tokens on incoming requests.
  *
- * Extracts the token from the `Authorization: Bearer <token>` header, validates
- * it against the SessionStore, and populates `req.user` with the session identity.
- * Returns 401 with a helpful JSON body when authentication fails.
+ * Connector-aware: if the upstream JWT middleware already validated an Entra JWT
+ * (setting req.entraUser), session validation is skipped entirely.
+ *
+ * Otherwise, extracts the token from the `Authorization: Bearer <token>` header,
+ * validates it against the SessionStore, and populates `req.user` with the
+ * session identity.  Returns 401 with a WWW-Authenticate challenge header when
+ * authentication fails.
  *
  * @param {import('../auth/session-store')} sessionStore
  * @returns {import('express').RequestHandler}
  */
 function createSessionMiddleware(sessionStore) {
   return (req, res, next) => {
+    // Connector path: JWT middleware already validated the Entra token
+    if (hasValidEntraPrincipal(req)) {
+      return next();
+    }
+
+    // Session path: validate the Bearer token as a session token
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      res.set('WWW-Authenticate', buildWwwAuthenticateChallenge(req));
       return res.status(401).json({
         error: 'auth_required',
         message: 'Session expired or missing. Authenticate at: /auth/login',
@@ -60,6 +79,7 @@ function createSessionMiddleware(sessionStore) {
     const session = sessionStore.validateSession(token);
 
     if (!session) {
+      res.set('WWW-Authenticate', buildWwwAuthenticateChallenge(req));
       return res.status(401).json({
         error: 'auth_required',
         message: 'Session expired or invalid. Re-authenticate at: /auth/login',
@@ -169,6 +189,10 @@ function createFallbackRequestHandler() {
 function createHttpApp({ sessionStore, tokenStorage } = {}) {
   const app = express();
 
+  // ── Discovery endpoints — public, no auth ──────────────────────────
+  app.get('/.well-known/oauth-protected-resource', prmHandler);
+  app.get('/.well-known/oauth-authorization-server', oauthMetadataHandler);
+
   // ── Browser auth routes (login + callback) ────────────────────────
   if (sessionStore && tokenStorage) {
     const authRouter = createAuthRoutes({
@@ -178,6 +202,13 @@ function createHttpApp({ sessionStore, tokenStorage } = {}) {
     });
     app.use('/auth', authRouter);
   }
+
+  app.get('/attachments/download/:token', async (req, res) => {
+    await handleAttachmentDownloadRequest(req, res, { token: req.params.token });
+  });
+
+  // ── JWT auth middleware (connector path) ────────────────────────
+  app.use('/mcp', jwtMiddleware);
 
   // ── Session-token auth middleware (optional) ───────────────────────
   if (sessionStore) {
@@ -189,10 +220,22 @@ function createHttpApp({ sessionStore, tokenStorage } = {}) {
   // NOTE: We do NOT use express.json() — the StreamableHTTPServerTransport
   // handles body parsing internally.
   app.all('/mcp', async (req, res) => {
-    const userCtx = {
-      userId: req.user?.id,
-      sessionToken: req.user?.sessionToken,
-    };
+    const serverBaseUrl = getServerBaseUrl(config, req);
+    const userCtx = hasValidEntraPrincipal(req)
+      ? {
+          userId: req.entraUser.oid,
+          authMethod: 'connector',
+          entraToken: req.entraToken,
+          serverBaseUrl,
+        }
+      : req.user?.id
+        ? {
+          userId: req.user?.id,
+          authMethod: 'session',
+          sessionToken: req.user?.sessionToken,
+          serverBaseUrl,
+        }
+        : null;
 
     await requestContext.run(userCtx, async () => {
       // Per-request transport (stateless mode)

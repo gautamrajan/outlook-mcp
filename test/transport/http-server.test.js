@@ -9,6 +9,7 @@
  *   - Test session-token middleware rejects unauthenticated requests.
  */
 const http = require('http');
+const { Readable } = require('stream');
 const request = require('supertest');
 
 // ── Mocks ────────────────────────────────────────────────────────────
@@ -40,6 +41,19 @@ jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
   StreamableHTTPServerTransport: MockTransport,
 }));
 
+// Mock jwks-rsa to prevent jose ESM import from blowing up in Jest
+jest.mock('jwks-rsa', () => jest.fn(() => ({ getSigningKey: jest.fn() })));
+
+// Mock jwt-validator — reject by default so session tokens pass through
+// to the session middleware (jwt-middleware silently swallows validation errors)
+jest.mock('../../auth/jwt-validator', () => ({
+  validateEntraJwt: jest.fn().mockRejectedValue(new Error('JWT validation failed: not a JWT')),
+}));
+
+jest.mock('../../utils/graph-api', () => ({
+  streamGraphAPI: jest.fn(),
+}));
+
 // Mock config
 jest.mock('../../config', () => ({
   SERVER_NAME: 'test-outlook-assistant',
@@ -48,10 +62,16 @@ jest.mock('../../config', () => ({
     tenantId: 'test-tenant-id',
     clientId: 'test-client-id',
   },
+  CONNECTOR_AUTH: {
+    apiAppId: 'api://test-app-id',
+    apiScope: 'mcp.access',
+  },
 }));
 
 // Spy on request context to verify it's set during handling
 const { requestContext, getUserContext } = require('../../auth/request-context');
+const { streamGraphAPI } = require('../../utils/graph-api');
+const { issueDownloadTicket, clearDownloadTickets } = require('../../email/download-ticket-store');
 
 // ── Import under test (after all mocks) ──────────────────────────────
 const { createHttpApp, startHttpServer, createSessionMiddleware } = require('../../transport/http-server');
@@ -104,6 +124,7 @@ describe('HTTP Transport Server', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    clearDownloadTickets();
     app = createHttpApp();
   });
 
@@ -273,10 +294,77 @@ describe('HTTP Transport Server', () => {
     });
   });
 
+  describe('Attachment download route', () => {
+    test('exists without MCP auth and returns 404 for invalid token', async () => {
+      const res = await request(app).get('/attachments/download/invalid-token');
+
+      expect(res.status).toBe(404);
+      expect(res.text).toBe('Attachment download URL is invalid.');
+      expect(mockHandleRequest).not.toHaveBeenCalled();
+    });
+
+    test('streams a valid attachment download', async () => {
+      const ticket = issueDownloadTicket({
+        accessToken: 'token',
+        authContext: null,
+        emailId: 'email-1',
+        attachmentId: 'att-1',
+        name: 'report.txt',
+        contentType: 'text/plain',
+        size: 4,
+      });
+
+      streamGraphAPI.mockResolvedValue({
+        statusCode: 200,
+        headers: {
+          'content-type': 'text/plain',
+          'content-length': '4',
+        },
+        stream: Readable.from(Buffer.from('test')),
+      });
+
+      const res = await request(app).get(`/attachments/download/${ticket.token}`);
+
+      expect(res.status).toBe(200);
+      expect(res.text).toBe('test');
+      expect(res.headers['content-disposition']).toContain('report.txt');
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(mockHandleRequest).not.toHaveBeenCalled();
+    });
+
+    test('returns 410 for a consumed token', async () => {
+      const ticket = issueDownloadTicket({
+        accessToken: 'token',
+        authContext: null,
+        emailId: 'email-1',
+        attachmentId: 'att-1',
+        name: 'report.txt',
+        contentType: 'text/plain',
+        size: 4,
+      });
+
+      streamGraphAPI.mockResolvedValue({
+        statusCode: 200,
+        headers: {
+          'content-type': 'text/plain',
+          'content-length': '4',
+        },
+        stream: Readable.from(Buffer.from('test')),
+      });
+
+      const first = await request(app).get(`/attachments/download/${ticket.token}`);
+      expect(first.status).toBe(200);
+
+      const second = await request(app).get(`/attachments/download/${ticket.token}`);
+      expect(second.status).toBe(410);
+      expect(second.text).toBe('Download URL expired. Request a new attachment download URL.');
+    });
+  });
+
   // ── Request context (AsyncLocalStorage) ──────────────────────────
 
   describe('User context in AsyncLocalStorage', () => {
-    test('wraps request handling in AsyncLocalStorage context', async () => {
+    test('leaves request context unset when no authenticated user is present', async () => {
       let capturedContext = null;
 
       // Override handleRequest to capture the async context
@@ -290,10 +378,7 @@ describe('HTTP Transport Server', () => {
         .post('/mcp')
         .send(initializeBody());
 
-      // Context should exist (user fields are undefined without auth middleware)
-      expect(capturedContext).not.toBeNull();
-      expect(capturedContext).toHaveProperty('userId');
-      expect(capturedContext).toHaveProperty('sessionToken');
+      expect(capturedContext).toBeNull();
     });
 
     test('populates userId and sessionToken from middleware when session is active', async () => {
@@ -318,6 +403,7 @@ describe('HTTP Transport Server', () => {
       expect(capturedContext).not.toBeNull();
       expect(capturedContext.userId).toBe('user-abc');
       expect(capturedContext.sessionToken).toBe(validToken);
+      expect(capturedContext.serverBaseUrl).toMatch(/^http:\/\/(127\.0\.0\.1|localhost):\d+$/);
     });
   });
 

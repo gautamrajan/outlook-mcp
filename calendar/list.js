@@ -4,6 +4,7 @@
 const config = require('../config');
 const { callGraphAPI } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
+const { resolveIanaTimezone, getNowInTimezone, formatEventRange, formatAllDayRange, formatReferenceTimestamp } = require('../utils/date-helpers');
 
 /**
  * List events handler
@@ -50,20 +51,28 @@ async function handleListEvents(args) {
       };
     }
     
+    // Resolve timezone and compute reference info
+    const ianaTz = resolveIanaTimezone(config.DEFAULT_TIMEZONE);
+    const todayParts = getNowInTimezone(ianaTz);
+    const refTimestamp = formatReferenceTimestamp(ianaTz);
+
     // Format results
     const eventList = response.value.map((event, index) => {
-      const tz = event.start.timeZone || 'UTC';
-      const start = `${event.start.dateTime} (${tz})`;
-      const end = `${event.end.dateTime} (${tz})`;
-      const location = event.location?.displayName || 'No location';
+      const cancelPrefix = event.isCancelled ? '[CANCELED] ' : '';
+      const timeRange = event.isAllDay
+        ? formatAllDayRange(event.start.dateTime, event.end.dateTime, todayParts)
+        : formatEventRange(event.start.dateTime, event.end.dateTime, ianaTz, todayParts);
+      const location = event.location?.displayName;
+      const locationLine = location ? `\n   Location: ${location}` : '';
+      const summaryLine = event.bodyPreview ? `\n   Summary: ${event.bodyPreview}` : '';
 
-      return `${index + 1}. ${event.subject} - Location: ${location}\nStart: ${start}\nEnd: ${end}\nSummary: ${event.bodyPreview}\nID: ${event.id}\n`;
+      return `${index + 1}. ${cancelPrefix}${event.subject}\n   ${timeRange}${locationLine}${summaryLine}\n   ID: ${event.id}\n`;
     }).join("\n");
-    
+
     return {
-      content: [{ 
-        type: "text", 
-        text: `Found ${response.value.length} events:\n\n${eventList}`
+      content: [{
+        type: "text",
+        text: `${refTimestamp}\n\nFound ${response.value.length} events:\n\n${eventList}`
       }]
     };
   } catch (error) {

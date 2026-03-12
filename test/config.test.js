@@ -67,6 +67,12 @@ describe('config', () => {
     expect(config.MAX_RESULT_COUNT).toBe(50);
   });
 
+  test('should export attachment download limits', () => {
+    const config = require('../config');
+    expect(config.ATTACHMENT_DOWNLOAD_TTL_MS).toBe(5 * 60 * 1000);
+    expect(config.MAX_ATTACHMENT_DOWNLOAD_BYTES).toBe(25 * 1024 * 1024);
+  });
+
   test('should export DEFAULT_TIMEZONE', () => {
     const config = require('../config');
     expect(config.DEFAULT_TIMEZONE).toBeDefined();
@@ -133,7 +139,9 @@ describe('config', () => {
     expect(config.HOSTED).toHaveProperty('tokenEncryptionKey');
     expect(config.HOSTED).toHaveProperty('tokenStorePath');
     expect(config.HOSTED).toHaveProperty('sessionStorePath');
+    expect(config.HOSTED).toHaveProperty('publicBaseUrl');
     expect(config.HOSTED).toHaveProperty('hostedRedirectUri');
+    expect(config.HOSTED).toHaveProperty('sessionExpirationDays');
   });
 
   test('HOSTED.tokenEncryptionKey should default to empty string', () => {
@@ -182,6 +190,36 @@ describe('config', () => {
     process.env.HOSTED_REDIRECT_URI = 'https://myserver.com/auth/callback';
     const config = require('../config');
     expect(config.HOSTED.hostedRedirectUri).toBe('https://myserver.com/auth/callback');
+  });
+
+  test('HOSTED.publicBaseUrl should default to empty string', () => {
+    delete process.env.PUBLIC_BASE_URL;
+    const config = require('../config');
+    expect(config.HOSTED.publicBaseUrl).toBe('');
+  });
+
+  test('HOSTED.publicBaseUrl should reflect env var', () => {
+    process.env.PUBLIC_BASE_URL = 'https://public.example.com';
+    const config = require('../config');
+    expect(config.HOSTED.publicBaseUrl).toBe('https://public.example.com');
+  });
+
+  test('HOSTED.sessionExpirationDays should default to 14', () => {
+    delete process.env.HOSTED_SESSION_EXPIRATION_DAYS;
+    const config = require('../config');
+    expect(config.HOSTED.sessionExpirationDays).toBe(14);
+  });
+
+  test('HOSTED.sessionExpirationDays should parse positive integer env var', () => {
+    process.env.HOSTED_SESSION_EXPIRATION_DAYS = '30';
+    const config = require('../config');
+    expect(config.HOSTED.sessionExpirationDays).toBe(30);
+  });
+
+  test('HOSTED.sessionExpirationDays should fall back to 14 for invalid values', () => {
+    process.env.HOSTED_SESSION_EXPIRATION_DAYS = '0';
+    const config = require('../config');
+    expect(config.HOSTED.sessionExpirationDays).toBe(14);
   });
 
   // ── AUTH_CONFIG hosted fields ─────────────────────────────────

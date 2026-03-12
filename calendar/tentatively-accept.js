@@ -10,7 +10,7 @@ const { ensureAuthenticated } = require('../auth');
  * @returns {object} - MCP response
  */
 async function handleTentativelyAcceptEvent(args) {
-  const { eventId, comment } = args;
+  const { eventId } = args;
 
   if (!eventId) {
     return {
@@ -27,7 +27,7 @@ async function handleTentativelyAcceptEvent(args) {
     const endpoint = `me/events/${encodeURIComponent(eventId)}/tentativelyAccept`;
 
     const body = {
-      comment: comment || "Tentatively accepted via API"
+      sendResponse: false
     };
 
     await callGraphAPI(accessToken, 'POST', endpoint, body);
@@ -35,7 +35,7 @@ async function handleTentativelyAcceptEvent(args) {
     return {
       content: [{
         type: "text",
-        text: `Event with ID ${eventId} has been tentatively accepted.`
+        text: `Event with ID ${eventId} has been tentatively accepted without sending a response.`
       }]
     };
   } catch (error) {

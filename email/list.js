@@ -5,6 +5,7 @@ const config = require('../config');
 const { callGraphAPI, callGraphAPIPaginated } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
 const { resolveFolderPath } = require('./folder-utils');
+const { resolveIanaTimezone, formatEmailDate } = require('../utils/date-helpers');
 
 /**
  * List emails handler
@@ -42,12 +43,14 @@ async function handleListEmails(args) {
     }
     
     // Format results
+    const ianaTz = resolveIanaTimezone(config.DEFAULT_TIMEZONE);
     const emailList = response.value.map((email, index) => {
       const sender = email.from ? email.from.emailAddress : { name: 'Unknown', address: 'unknown' };
-      const date = new Date(email.receivedDateTime).toLocaleString();
+      const date = formatEmailDate(email.receivedDateTime, ianaTz);
       const readStatus = email.isRead ? '' : '[UNREAD] ';
-      
-      return `${index + 1}. ${readStatus}${date} - From: ${sender.name} (${sender.address})\nSubject: ${email.subject}\nID: ${email.id}\n`;
+
+      const preview = email.bodyPreview ? `\nPreview: ${email.bodyPreview}` : '';
+      return `${index + 1}. ${readStatus}${date} - From: ${sender.name} (${sender.address})\nSubject: ${email.subject}${preview}\nID: ${email.id}\n`;
     }).join("\n");
     
     return {

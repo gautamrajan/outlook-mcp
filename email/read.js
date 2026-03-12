@@ -4,6 +4,11 @@
 const config = require('../config');
 const { callGraphAPI } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
+const { resolveIanaTimezone, formatEmailDate } = require('../utils/date-helpers');
+const {
+  listMessageAttachments,
+  formatAttachmentSummaryText,
+} = require('./attachments');
 
 /**
  * Read email handler
@@ -51,7 +56,8 @@ async function handleReadEmail(args) {
       const to = email.toRecipients ? email.toRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
       const cc = email.ccRecipients && email.ccRecipients.length > 0 ? email.ccRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
       const bcc = email.bccRecipients && email.bccRecipients.length > 0 ? email.bccRecipients.map(r => `${r.emailAddress.name} (${r.emailAddress.address})`).join(", ") : 'None';
-      const date = new Date(email.receivedDateTime).toLocaleString();
+      const ianaTz = resolveIanaTimezone(config.DEFAULT_TIMEZONE);
+      const date = formatEmailDate(email.receivedDateTime, ianaTz);
       
       // Extract body content
       let body = '';
@@ -65,7 +71,7 @@ async function handleReadEmail(args) {
       }
       
       // Format the email
-      const formattedEmail = `From: ${sender}
+      let formattedEmail = `From: ${sender}
 To: ${to}
 ${cc !== 'None' ? `CC: ${cc}\n` : ''}${bcc !== 'None' ? `BCC: ${bcc}\n` : ''}Subject: ${email.subject}
 Date: ${date}
@@ -73,6 +79,15 @@ Importance: ${email.importance || 'normal'}
 Has Attachments: ${email.hasAttachments ? 'Yes' : 'No'}
 
 ${body}`;
+
+      if (email.hasAttachments) {
+        try {
+          const attachments = await listMessageAttachments(accessToken, emailId);
+          formattedEmail += `\n\n${formatAttachmentSummaryText(attachments)}`;
+        } catch (attachmentError) {
+          formattedEmail += `\n\nAttachments: unable to load attachment metadata (${attachmentError.message})`;
+        }
+      }
       
       return {
         content: [
