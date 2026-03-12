@@ -3,7 +3,7 @@
  */
 const { callGraphAPI } = require('../utils/graph-api');
 const { ensureAuthenticated } = require('../auth');
-const { DEFAULT_TIMEZONE } = require('../config');
+const { buildCreateEventPayload } = require('./event-payload');
 
 /**
  * Create event handler
@@ -11,7 +11,7 @@ const { DEFAULT_TIMEZONE } = require('../config');
  * @returns {object} - MCP response
  */
 async function handleCreateEvent(args) {
-  const { subject, start, end, attendees, body } = args;
+  const { subject, start, end } = args;
 
   if (!subject || !start || !end) {
     return {
@@ -30,13 +30,7 @@ async function handleCreateEvent(args) {
     const endpoint = `me/events`;
 
     // Request body
-    const bodyContent = {
-      subject,
-      start: { dateTime: start.dateTime || start, timeZone: start.timeZone || DEFAULT_TIMEZONE },
-      end: { dateTime: end.dateTime || end, timeZone: end.timeZone || DEFAULT_TIMEZONE },
-      attendees: attendees?.map(email => ({ emailAddress: { address: email }, type: "required" })),
-      body: { contentType: "HTML", content: body || "" }
-    };
+    const bodyContent = buildCreateEventPayload(args);
 
     // Make API call
     const response = await callGraphAPI(accessToken, 'POST', endpoint, bodyContent);

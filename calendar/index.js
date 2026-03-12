@@ -4,10 +4,35 @@
 const handleListEvents = require('./list');
 const handleDeclineEvent = require('./decline');
 const handleCreateEvent = require('./create');
+const handleUpdateEvent = require('./update');
 const handleCancelEvent = require('./cancel');
 const handleDeleteEvent = require('./delete');
 const handleAcceptEvent = require('./accept');
 const handleTentativelyAcceptEvent = require('./tentatively-accept');
+
+const dateTimeInputSchema = {
+  oneOf: [
+    {
+      type: 'string',
+      description: 'An ISO 8601 date-time string'
+    },
+    {
+      type: 'object',
+      properties: {
+        dateTime: {
+          type: 'string',
+          description: 'The date-time value in ISO 8601 format'
+        },
+        timeZone: {
+          type: 'string',
+          description: 'Optional Windows timezone name'
+        }
+      },
+      required: ['dateTime']
+    }
+  ],
+  description: 'The event time as an ISO 8601 string or a dateTime/timeZone object'
+};
 
 // Calendar tool definitions
 const calendarTools = [
@@ -51,14 +76,8 @@ const calendarTools = [
           type: "string",
           description: "The subject of the event"
         },
-        start: {
-          type: "string",
-          description: "The start time of the event in ISO 8601 format"
-        },
-        end: {
-          type: "string",
-          description: "The end time of the event in ISO 8601 format"
-        },
+        start: dateTimeInputSchema,
+        end: dateTimeInputSchema,
         attendees: {
           type: "array",
           items: {
@@ -74,6 +93,46 @@ const calendarTools = [
       required: ["subject", "start", "end"]
     },
     handler: handleCreateEvent
+  },
+  {
+    name: "update-event",
+    description: "Updates an existing calendar event",
+    inputSchema: {
+      type: "object",
+      properties: {
+        eventId: {
+          type: "string",
+          description: "The ID of the event to update"
+        },
+        subject: {
+          type: "string",
+          description: "The updated subject of the event"
+        },
+        start: dateTimeInputSchema,
+        end: dateTimeInputSchema,
+        attendees: {
+          type: "array",
+          items: {
+            type: "string"
+          },
+          description: "Replacement list of attendee email addresses"
+        },
+        body: {
+          type: "string",
+          description: "Updated body content for the event"
+        },
+        location: {
+          type: "string",
+          description: "Updated display name for the event location"
+        },
+        isAllDay: {
+          type: "boolean",
+          description: "Whether the event should be marked as all-day"
+        }
+      },
+      required: ["eventId"]
+    },
+    handler: handleUpdateEvent
   },
   {
     name: "cancel-event",
@@ -146,6 +205,7 @@ module.exports = {
   handleListEvents,
   handleDeclineEvent,
   handleCreateEvent,
+  handleUpdateEvent,
   handleCancelEvent,
   handleDeleteEvent,
   handleAcceptEvent,
