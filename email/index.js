@@ -84,7 +84,11 @@ const emailTools = [
       properties: {
         query: {
           type: "string",
-          description: "Search query text to find in emails"
+          description: "Search query text to find in emails. Defaults to fuzzy token matching."
+        },
+        queryExactPhrase: {
+          type: "boolean",
+          description: "If true, treat query as an exact phrase. Quote characters in the input are still sanitized; phrase behavior is controlled by this flag."
         },
         folder: {
           type: "string",
@@ -92,15 +96,27 @@ const emailTools = [
         },
         from: {
           type: "string",
-          description: "Filter by sender email address or name"
+          description: "Filter by sender email address or name. Defaults to fuzzy token matching within the sender field."
+        },
+        fromExactPhrase: {
+          type: "boolean",
+          description: "If true, treat from as an exact phrase within the sender field. Quote characters in the input are still sanitized; phrase behavior is controlled by this flag."
         },
         to: {
           type: "string",
-          description: "Filter by recipient email address or name"
+          description: "Filter by recipient email address or name. Defaults to fuzzy token matching within the recipient field."
+        },
+        toExactPhrase: {
+          type: "boolean",
+          description: "If true, treat to as an exact phrase within the recipient field. Quote characters in the input are still sanitized; phrase behavior is controlled by this flag."
         },
         subject: {
           type: "string",
-          description: "Filter by email subject"
+          description: "Filter by email subject. Defaults to fuzzy token matching within the subject field."
+        },
+        subjectExactPhrase: {
+          type: "boolean",
+          description: "If true, treat subject as an exact phrase within the subject field. Quote characters in the input are still sanitized; phrase behavior is controlled by this flag."
         },
         hasAttachments: {
           type: "boolean",

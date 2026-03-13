@@ -12,7 +12,7 @@ const { resolveIanaTimezone, formatEmailDate } = require('../utils/date-helpers'
 /**
  * Sanitize a value for use inside a KQL expression.
  * Strips characters that break KQL parsing (single quotes, backslashes, colons
- * inside values) and wraps multi-word values in double quotes.
+ * and double quotes inside values).
  * @param {string} value - Raw search value
  * @returns {string} - Sanitized value safe for KQL
  */
@@ -31,12 +31,66 @@ function sanitizeKqlValue(value) {
   // Trim whitespace that may be left over
   sanitized = sanitized.trim();
 
-  // Wrap multi-word values in double quotes for KQL phrase scoping
-  if (sanitized.includes(' ')) {
-    sanitized = `"${sanitized}"`;
-  }
-
   return sanitized;
+}
+
+/**
+ * Split a sanitized KQL value into non-empty tokens.
+ * @param {string} value - Raw search value
+ * @returns {string[]} Sanitized tokens
+ */
+function tokenizeKqlValue(value) {
+  const sanitized = sanitizeKqlValue(value);
+  if (!sanitized) return [];
+  return sanitized.split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Build KQL terms for a bare query value.
+ * @param {string} value - Raw query value
+ * @param {boolean} exactPhrase - Whether to preserve phrase semantics
+ * @returns {string[]} KQL terms
+ */
+function buildBareQueryTerms(value, exactPhrase = false) {
+  const tokens = tokenizeKqlValue(value);
+  if (tokens.length === 0) return [];
+  if (exactPhrase && tokens.length > 1) {
+    return [`"${tokens.join(' ')}"`];
+  }
+  return tokens;
+}
+
+/**
+ * Build KQL terms for a field-qualified value.
+ * @param {string} field - KQL field name
+ * @param {string} value - Raw field value
+ * @param {boolean} exactPhrase - Whether to preserve phrase semantics
+ * @returns {string[]} KQL terms
+ */
+function buildFieldQueryTerms(field, value, exactPhrase = false) {
+  const tokens = tokenizeKqlValue(value);
+  if (tokens.length === 0) return [];
+  if (exactPhrase && tokens.length > 1) {
+    return [`${field}:"${tokens.join(' ')}"`];
+  }
+  return tokens.map(token => `${field}:${token}`);
+}
+
+/**
+ * Build text KQL terms from the supported search inputs.
+ * @param {object} searchTerms - Search terms (query, from, to, subject)
+ * @param {object} matchOptions - Exact phrase options
+ * @returns {string[]} KQL text terms
+ */
+function buildTextKqlTerms(searchTerms, matchOptions = {}) {
+  const kqlTerms = [];
+
+  kqlTerms.push(...buildBareQueryTerms(searchTerms.query, matchOptions.queryExactPhrase === true));
+  kqlTerms.push(...buildFieldQueryTerms('subject', searchTerms.subject, matchOptions.subjectExactPhrase === true));
+  kqlTerms.push(...buildFieldQueryTerms('from', searchTerms.from, matchOptions.fromExactPhrase === true));
+  kqlTerms.push(...buildFieldQueryTerms('to', searchTerms.to, matchOptions.toExactPhrase === true));
+
+  return kqlTerms;
 }
 
 /**
@@ -81,6 +135,12 @@ async function handleSearchEmails(args) {
   const subject = args.subject || '';
   const hasAttachments = args.hasAttachments;
   const unreadOnly = args.unreadOnly;
+  const matchOptions = {
+    queryExactPhrase: args.queryExactPhrase === true,
+    fromExactPhrase: args.fromExactPhrase === true,
+    toExactPhrase: args.toExactPhrase === true,
+    subjectExactPhrase: args.subjectExactPhrase === true,
+  };
   
   try {
     // Get access token
@@ -96,7 +156,8 @@ async function handleSearchEmails(args) {
       accessToken, 
       { query, from, to, subject },
       { hasAttachments, unreadOnly },
-      requestedCount
+      requestedCount,
+      matchOptions
     );
     
     return formatSearchResults(response);
@@ -130,19 +191,35 @@ async function handleSearchEmails(args) {
  * @param {number} maxCount - Maximum number of results to retrieve
  * @returns {Promise<object>} - Search results
  */
-async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms, maxCount) {
+async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms, maxCount, matchOptions = {}) {
   // Track search strategies attempted
   const searchAttempts = [];
 
   // When unreadOnly is combined with $search, we need to over-fetch since
   // isRead is not a supported KQL property and must be post-filtered.
-  const hasKqlTerms = Object.values(searchTerms).some(v => v);
-  const needsPostFilter = filterTerms.unreadOnly === true && hasKqlTerms;
+  const hasRawSearchTerms = Object.values(searchTerms).some(v => v);
+  const hasEffectiveKqlTerms = buildTextKqlTerms(searchTerms, matchOptions).length > 0;
+  const hasBooleanFilters = filterTerms.hasAttachments === true || filterTerms.unreadOnly === true;
+  const needsPostFilter = filterTerms.unreadOnly === true && hasEffectiveKqlTerms;
   const fetchCount = needsPostFilter ? Math.min(50, maxCount * 3) : Math.min(50, maxCount);
+
+  // Avoid treating a fully sanitized-away search string as an unfiltered mailbox query.
+  if (hasRawSearchTerms && !hasEffectiveKqlTerms && !hasBooleanFilters) {
+    return {
+      value: [],
+      _searchInfo: {
+        attemptsCount: 0,
+        strategies: [],
+        originalTerms: searchTerms,
+        filterTerms: filterTerms,
+        warning: 'Search terms were removed during sanitization. Please refine your query.'
+      }
+    };
+  }
   
   // 1. Try combined search (most specific)
   try {
-    const params = buildSearchParams(searchTerms, filterTerms, fetchCount);
+    const params = buildSearchParams(searchTerms, filterTerms, fetchCount, matchOptions);
     console.error("Attempting combined search with params:", params);
     searchAttempts.push("combined-search");
 
@@ -165,29 +242,21 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
     if (searchTerms[term]) {
       try {
         console.error(`Attempting search with only ${term}: "${searchTerms[term]}"`);
+        const singleTermSearchTerms = { query: '', from: '', to: '', subject: '' };
+        singleTermSearchTerms[term] = searchTerms[term];
+
+        const simplifiedParams = buildSearchParams(
+          singleTermSearchTerms,
+          filterTerms,
+          fetchCount,
+          matchOptions
+        );
+
+        if (!simplifiedParams.$search) {
+          continue;
+        }
+
         searchAttempts.push(`single-term-${term}`);
-
-        const simplifiedParams = {
-          $top: fetchCount,
-          $select: config.EMAIL_SELECT_FIELDS
-        };
-
-        // Build the KQL search string for this single term
-        const sanitized = sanitizeKqlValue(searchTerms[term]);
-        const kqlParts = [];
-        if (term === 'query') {
-          kqlParts.push(sanitized);
-        } else {
-          kqlParts.push(`${term}:${sanitized}`);
-        }
-
-        // Fold boolean filters into KQL (cannot combine $search with $filter)
-        const boolKql = buildKqlBooleans(filterTerms);
-        if (boolKql) {
-          kqlParts.push(boolKql);
-        }
-
-        simplifiedParams.$search = `"${kqlParts.join(' ')}"`;
 
         const singleFetchMax = needsPostFilter ? fetchCount : maxCount;
         const response = await callGraphAPIPaginated(accessToken, 'GET', endpoint, simplifiedParams, singleFetchMax);
@@ -210,7 +279,7 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
   }
   
   // 3. Try with only boolean filters (using $filter since there's no $search)
-  if (filterTerms.hasAttachments === true || filterTerms.unreadOnly === true) {
+  if (hasBooleanFilters) {
     try {
       console.error("Attempting search with only boolean filters");
       searchAttempts.push("boolean-filters-only");
@@ -228,8 +297,7 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
       console.error(`Boolean filter search found ${response.value?.length || 0} results`);
 
       // Warn that search terms were dropped (Bug 2: no silent data loss)
-      const hasSearchTerms = Object.values(searchTerms).some(v => v);
-      if (hasSearchTerms) {
+      if (hasRawSearchTerms) {
         response._searchInfo = {
           attemptsCount: searchAttempts.length,
           strategies: [...searchAttempts],
@@ -286,32 +354,16 @@ async function progressiveSearch(endpoint, accessToken, searchTerms, filterTerms
  * @param {object} searchTerms - Search terms (query, from, to, subject)
  * @param {object} filterTerms - Filter terms (hasAttachments, unreadOnly)
  * @param {number} count - Maximum number of results
+ * @param {object} matchOptions - Exact phrase options
  * @returns {object} - Query parameters
  */
-function buildSearchParams(searchTerms, filterTerms, count) {
+function buildSearchParams(searchTerms, filterTerms, count, matchOptions = {}) {
   const params = {
     $top: count,
     $select: config.EMAIL_SELECT_FIELDS
   };
 
-  // Handle search terms
-  const kqlTerms = [];
-
-  if (searchTerms.query) {
-    kqlTerms.push(sanitizeKqlValue(searchTerms.query));
-  }
-
-  if (searchTerms.subject) {
-    kqlTerms.push(`subject:${sanitizeKqlValue(searchTerms.subject)}`);
-  }
-
-  if (searchTerms.from) {
-    kqlTerms.push(`from:${sanitizeKqlValue(searchTerms.from)}`);
-  }
-
-  if (searchTerms.to) {
-    kqlTerms.push(`to:${sanitizeKqlValue(searchTerms.to)}`);
-  }
+  const kqlTerms = buildTextKqlTerms(searchTerms, matchOptions);
 
   // When we have KQL search terms, fold boolean filters into the KQL string
   // (Graph API does NOT allow combining $search with $filter)
@@ -320,7 +372,12 @@ function buildSearchParams(searchTerms, filterTerms, count) {
     if (boolKql) {
       kqlTerms.push(boolKql);
     }
-    params.$search = `"${kqlTerms.join(' ')}"`;
+    const joined = kqlTerms.join(' ');
+    // If any term already contains inner double quotes (from exact-phrase
+    // construction like subject:"Q4 Report"), the expression is valid KQL
+    // as-is and must NOT be wrapped in outer quotes — KQL has no escape
+    // mechanism for nested quotes.
+    params.$search = joined.includes('"') ? joined : `"${joined}"`;
   } else {
     // No KQL search terms — use $filter for booleans
     addBooleanFilters(params, filterTerms);
@@ -408,6 +465,10 @@ module.exports = handleSearchEmails;
 module.exports._internal = {
   ENABLE_RECENT_EMAILS_FALLBACK,
   sanitizeKqlValue,
+  tokenizeKqlValue,
+  buildBareQueryTerms,
+  buildFieldQueryTerms,
+  buildTextKqlTerms,
   buildKqlBooleans,
   applyPostFilters,
   buildSearchParams,
